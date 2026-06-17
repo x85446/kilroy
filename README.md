@@ -260,6 +260,8 @@ Observe and intervene during long runs:
 ./kilroy attractor stop --logs-root <logs_root> --grace-ms 30000 --force
 ```
 
+For long pipelines that re-enter nodes (e.g. `postmortem` → `impl_fanout`), pass `--no-stage-archive-stacking` to prevent exponential disk growth in `stage.tgz` archives — see the [Commands](#commands) section for details.
+
 ## CXDB Autostart Notes
 
 - `cxdb.autostart.command` is required when `cxdb.autostart.enabled=true`.
@@ -409,8 +411,8 @@ Typical stage-level artifacts under `{logs_root}/{node_id}`:
 ## Commands
 
 ```text
-kilroy attractor run [--preflight|--test-run] [--allow-test-shim] [--force-model <provider=model>] --graph <file.dot> --config <run.yaml> [--run-id <id>] [--logs-root <dir>]
-kilroy attractor resume --logs-root <dir>
+kilroy attractor run [--preflight|--test-run] [--allow-test-shim] [--force-model <provider=model>] [--no-stage-archive-stacking] --graph <file.dot> --config <run.yaml> [--run-id <id>] [--logs-root <dir>]
+kilroy attractor resume --logs-root <dir> [--no-stage-archive-stacking]
 kilroy attractor resume --cxdb <http_base_url> --context-id <id>
 kilroy attractor resume --run-branch <attractor/run/...> [--repo <path>]
 kilroy attractor status --logs-root <dir> [--json]
@@ -422,6 +424,8 @@ kilroy attractor serve [--addr <host:port>]
 
 `--force-model` can be passed multiple times (for example, `--force-model openai=gpt-5.4 --force-model google=gemini-3-pro-preview`) to override node model selection by provider.
 Supported providers are `openai`, `anthropic`, `google`, `kimi`, `zai`, and `minimax` (aliases accepted).
+
+`--no-stage-archive-stacking` excludes nested `visit_*/stage.tgz` files from the per-stage `stage.tgz` archive. Without this flag, when a node is re-entered N times (for example via `postmortem` → `impl_fanout` loops), each new visit's archive transitively includes every prior visit's archive, doubling in size per visit and producing exponential disk growth (issue #89). All per-visit metadata files (`response.md`, `status.json`, `prompt.md`, `events.{json,ndjson}`, `stdout.log`, etc.) are still archived — only the redundant inner tarballs are dropped. Recommended for any long-running pipeline that may revisit nodes. Available on both `attractor run` and `attractor resume --logs-root`.
 
 Additional ingest flags:
 

@@ -163,8 +163,8 @@ func graphDeclaredInputs(dotSource []byte) bool {
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:")
 	fmt.Fprintln(os.Stderr, "  kilroy --version")
-	fmt.Fprintln(os.Stderr, "  kilroy [--env-file <path>] attractor run (--graph <file.dot> | --package <dir>) [--tmux] [--detach] [--validate|--preflight|--test-run] [--skip-preflight] [--allow-test-shim] [--confirm-stale-build] [--no-cxdb] [--force-model <provider=model>] [--config <run.yaml>] [--run-id <id>] [--logs-root <dir>] [--input <path|json>] [--prompt-file <file>] [--workspace <dir>] [--label KEY=VALUE ...]")
-	fmt.Fprintln(os.Stderr, "  kilroy attractor resume --logs-root <dir>")
+	fmt.Fprintln(os.Stderr, "  kilroy [--env-file <path>] attractor run (--graph <file.dot> | --package <dir>) [--tmux] [--detach] [--validate|--preflight|--test-run] [--skip-preflight] [--allow-test-shim] [--confirm-stale-build] [--no-cxdb] [--no-stage-archive-stacking] [--force-model <provider=model>] [--config <run.yaml>] [--run-id <id>] [--logs-root <dir>] [--input <path|json>] [--prompt-file <file>] [--workspace <dir>] [--label KEY=VALUE ...]")
+	fmt.Fprintln(os.Stderr, "  kilroy attractor resume --logs-root <dir> [--no-stage-archive-stacking]")
 	fmt.Fprintln(os.Stderr, "  kilroy attractor resume --cxdb <http_base_url> --context-id <id>")
 	fmt.Fprintln(os.Stderr, "  kilroy attractor resume --run-branch <attractor/run/...> [--repo <path>]")
 	fmt.Fprintln(os.Stderr, "  kilroy attractor status [--logs-root <dir> | --latest] [--json] [-v|--verbose] [--follow|-f] [--cxdb] [--raw] [--watch] [--interval <sec>]")
@@ -223,6 +223,7 @@ func attractorRun(args []string) {
 	var allowTestShim bool
 	var confirmStaleBuild bool
 	var noCXDB bool
+	var noStageArchiveStacking bool
 	var skipCLIHeadlessWarning bool
 	var forceModelSpecs []string
 	var inputPath string
@@ -247,6 +248,8 @@ func attractorRun(args []string) {
 			confirmStaleBuild = true
 		case "--no-cxdb":
 			noCXDB = true
+		case "--no-stage-archive-stacking":
+			noStageArchiveStacking = true
 		case skipCLIHeadlessWarningFlag:
 			skipCLIHeadlessWarning = true
 		case "--force-model":
@@ -503,6 +506,9 @@ func attractorRun(args []string) {
 		if noCXDB {
 			childArgs = append(childArgs, "--no-cxdb")
 		}
+		if noStageArchiveStacking {
+			childArgs = append(childArgs, "--no-stage-archive-stacking")
+		}
 		if inputPath != "" && !strings.HasPrefix(strings.TrimSpace(inputPath), "{") {
 			if abs, err := filepath.Abs(inputPath); err == nil {
 				inputPath = abs
@@ -591,13 +597,14 @@ func attractorRun(args []string) {
 	if preflightOnly {
 		ctx, cleanupSignalCtx := signalCancelContext()
 		pf, err := engine.PreflightWithConfig(ctx, dotSource, cfg, engine.RunOptions{
-			RunID:         runID,
-			LogsRoot:      logsRoot,
-			AllowTestShim: allowTestShim,
-			DisableCXDB:   noCXDB,
-			ForceModels:   forceModels,
-			Registry:      newLayeredRegistry(useTmux),
-			GitOps:        gitOps,
+			RunID:                  runID,
+			LogsRoot:               logsRoot,
+			AllowTestShim:          allowTestShim,
+			DisableCXDB:            noCXDB,
+			NoStageArchiveStacking: noStageArchiveStacking,
+			ForceModels:            forceModels,
+			Registry:               newLayeredRegistry(useTmux),
+			GitOps:                 gitOps,
 			OnCXDBStartup: func(info *engine.CXDBStartupInfo) {
 				if info == nil {
 					return
@@ -649,14 +656,15 @@ func attractorRun(args []string) {
 	}
 
 	res, err := engine.RunWithConfig(ctx, dotSource, cfg, engine.RunOptions{
-		RunID:         runID,
-		LogsRoot:      logsRoot,
-		AllowTestShim: allowTestShim,
-		DisableCXDB:   noCXDB,
-		SkipPreflight: skipPreflight,
-		ForceModels:   forceModels,
-		Registry:      newLayeredRegistry(useTmux),
-		RunDB:         rdb,
+		RunID:                  runID,
+		LogsRoot:               logsRoot,
+		AllowTestShim:          allowTestShim,
+		DisableCXDB:            noCXDB,
+		NoStageArchiveStacking: noStageArchiveStacking,
+		SkipPreflight:          skipPreflight,
+		ForceModels:            forceModels,
+		Registry:               newLayeredRegistry(useTmux),
+		RunDB:                  rdb,
 		Inputs:        inputs,
 		Workspace:     workspace,
 		GraphDir:      graphDir,
@@ -1012,8 +1020,11 @@ func attractorResume(args []string) {
 	var contextID string
 	var runBranch string
 	var repoPath string
+	var noStageArchiveStacking bool
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
+		case "--no-stage-archive-stacking":
+			noStageArchiveStacking = true
 		case "--logs-root":
 			i++
 			if i >= len(args) {
@@ -1066,7 +1077,13 @@ func attractorResume(args []string) {
 	)
 	switch {
 	case logsRoot != "":
-		res, err = engine.Resume(ctx, logsRoot)
+		if noStageArchiveStacking {
+			res, err = engine.ResumeWithOverrides(ctx, logsRoot, engine.ResumeOverrides{
+				NoStageArchiveStacking: true,
+			})
+		} else {
+			res, err = engine.Resume(ctx, logsRoot)
+		}
 	case cxdbBaseURL != "" && contextID != "":
 		res, err = engine.ResumeFromCXDB(ctx, cxdbBaseURL, contextID)
 	case runBranch != "":

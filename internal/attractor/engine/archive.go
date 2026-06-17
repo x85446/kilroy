@@ -47,6 +47,22 @@ func includeInStageArchive(rel string, _ fs.DirEntry) bool {
 	return true
 }
 
+// includeInStageArchiveFlat is the variant used when RunOptions.NoStageArchiveStacking
+// is set. It additionally excludes any nested visit_*/stage.tgz (and .tmp) files so
+// that re-entries of the same node do not produce archives that recursively contain
+// every prior visit's archive (issue #89). The per-visit metadata files (response.md,
+// status.json, prompt.md, events.{json,ndjson}, stdout.log, etc.) under each visit_N/
+// dir are still included — only the redundant inner tarballs are dropped.
+func includeInStageArchiveFlat(rel string, d fs.DirEntry) bool {
+	if !includeInStageArchive(rel, d) {
+		return false
+	}
+	if strings.HasSuffix(rel, "/stage.tgz") || strings.HasSuffix(rel, "/stage.tgz.tmp") {
+		return false
+	}
+	return true
+}
+
 func includeInRunArchive(rel string, _ fs.DirEntry) bool {
 	if rel == "run.tgz" || rel == "run.tgz.tmp" {
 		return false

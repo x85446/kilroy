@@ -54,6 +54,13 @@ type RunOptions struct {
 	// all downstream consumers already nil-check before use.
 	DisableCXDB bool
 
+	// When true, exclude nested visit_*/stage.tgz files from the per-stage
+	// stage.tgz archive. Without this flag, a node that gets re-entered N
+	// times (e.g. via postmortem → impl_fanout loops) produces an archive at
+	// visit_N that transitively includes every prior visit's archive — sizes
+	// double per visit, leading to exponential disk growth (issue #89).
+	NoStageArchiveStacking bool
+
 	// Optional provider-level model overrides (provider -> model id).
 	// When set, the forced model is used for execution and bypasses model-catalog
 	// membership validation for that provider.

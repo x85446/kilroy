@@ -44,6 +44,11 @@ type ResumeOverrides struct {
 	CXDBHTTPBaseURL string
 	CXDBContextID   string
 	GitOps          GitOps
+
+	// When true, exclude nested visit_*/stage.tgz files from per-stage
+	// stage.tgz archives during the resumed run. See RunOptions.NoStageArchiveStacking
+	// for the rationale (issue #89).
+	NoStageArchiveStacking bool
 }
 
 // Resume continues an existing run from {logs_root}/checkpoint.json.
@@ -54,6 +59,13 @@ type ResumeOverrides struct {
 // - git commit SHA from checkpoint (code state)
 func Resume(ctx context.Context, logsRoot string) (*Result, error) {
 	return resumeFromLogsRoot(ctx, logsRoot, ResumeOverrides{})
+}
+
+// ResumeWithOverrides is like Resume but allows callers to supply overrides
+// (currently used to forward CLI-only flags such as --no-stage-archive-stacking
+// into the resumed engine's RunOptions).
+func ResumeWithOverrides(ctx context.Context, logsRoot string, ov ResumeOverrides) (*Result, error) {
+	return resumeFromLogsRoot(ctx, logsRoot, ov)
 }
 
 func resumeFromLogsRoot(ctx context.Context, logsRoot string, ov ResumeOverrides) (res *Result, err error) {
@@ -218,14 +230,15 @@ func resumeFromLogsRoot(ctx context.Context, logsRoot string, ov ResumeOverrides
 
 	prefix := deriveRunBranchPrefix(m, cfg)
 	opts := RunOptions{
-		RepoPath:        m.RepoPath,
-		RunID:           m.RunID,
-		LogsRoot:        logsRoot,
-		WorktreeDir:     filepath.Join(logsRoot, "worktree"),
-		RunBranchPrefix: prefix,
-		RequireClean:    resolveRequireClean(cfg),
-		ForceModels:     normalizeForceModels(copyStringStringMap(m.ForceModels)),
-		GitOps:          ov.GitOps,
+		RepoPath:               m.RepoPath,
+		RunID:                  m.RunID,
+		LogsRoot:               logsRoot,
+		WorktreeDir:            filepath.Join(logsRoot, "worktree"),
+		RunBranchPrefix:        prefix,
+		RequireClean:           resolveRequireClean(cfg),
+		ForceModels:            normalizeForceModels(copyStringStringMap(m.ForceModels)),
+		GitOps:                 ov.GitOps,
+		NoStageArchiveStacking: ov.NoStageArchiveStacking,
 	}
 	if err := opts.applyDefaults(); err != nil {
 		return nil, err
