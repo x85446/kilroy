@@ -3,7 +3,7 @@
 Started: 2026-06-18T05:10:00Z (planned), executing from 2026-06-18T05:15:00Z
 CWD: /Users/travis/workspace/x85446/kilroy
 phase: executing
-running: false
+running: 2026-06-18T07:58:30Z
 planner: iterate-planner
 loop_job: 3ee70191
 
@@ -153,6 +153,13 @@ No project oracle.md found at `./.claude/data/oracle.md`. Global oracle at `~/.c
 2026-06-18T07:48:30Z — pass1 at 846M. 3757 events.
 2026-06-18T07:49:30Z — pass1 at 1.0G. 3878 events.
 2026-06-18T07:50:30Z — pass1 at 1.2G. 4002 events.
+2026-06-18T07:51:30Z — pass1 at 1.4G. 4141 events.
+2026-06-18T07:52:30Z — pass1 at 2.1G, disk 7%. 4250 events.
+2026-06-18T07:53:30Z — pass1 at 2.1G (steady). 4374 events.
+2026-06-18T07:54:30Z — pass1 at 2.2G, branch advanced to implement_kernel_initramfs. 4517 events.
+2026-06-18T07:55:30Z — pass1 at 2.2G, 4661 events.
+2026-06-18T07:56:30Z — pass1 at 2.2G, branch implement_bootshim. 4771 events.
+2026-06-18T07:57:30Z — pass1 at 2.3G, branch implement_signing_manifests. 4920 events.
 2026-06-18T06:40:00Z — Steps 5/6/7 done.
   - Commit 4d3ded2 pushed to origin/main with the test file + final main.go wiring.
   - kilroyHelp: cmd_build_install now verifies BOTH --no-stage-archive-stacking and --keep-parallel-passes on run + resume.
