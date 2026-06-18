@@ -49,6 +49,13 @@ type ResumeOverrides struct {
 	// stage.tgz archives during the resumed run. See RunOptions.NoStageArchiveStacking
 	// for the rationale (issue #89).
 	NoStageArchiveStacking bool
+
+	// KeepParallelPasses controls fan-out pass worktree retention on disk.
+	// See RunOptions.KeepParallelPasses for full semantics.
+	//   0 → use default (1)
+	//   1+ → literal keep count
+	//   -1 → disabled (retain all)
+	KeepParallelPasses int
 }
 
 // Resume continues an existing run from {logs_root}/checkpoint.json.
@@ -239,6 +246,7 @@ func resumeFromLogsRoot(ctx context.Context, logsRoot string, ov ResumeOverrides
 		ForceModels:            normalizeForceModels(copyStringStringMap(m.ForceModels)),
 		GitOps:                 ov.GitOps,
 		NoStageArchiveStacking: ov.NoStageArchiveStacking,
+		KeepParallelPasses:     ov.KeepParallelPasses,
 	}
 	if err := opts.applyDefaults(); err != nil {
 		return nil, err

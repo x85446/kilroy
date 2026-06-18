@@ -61,6 +61,22 @@ type RunOptions struct {
 	// double per visit, leading to exponential disk growth (issue #89).
 	NoStageArchiveStacking bool
 
+	// KeepParallelPasses controls how many recent fan-out pass worktrees are
+	// retained on disk. Each re-entry of a parallel/fan-out node materializes
+	// a full set of child worktrees under
+	// `<logsRoot>/parallel/<nodeID>/pass<N>/<MM-key>/worktree/`. Without
+	// pruning, every pass accumulates indefinitely — observed a 267G run
+	// where 9 implement_fanout passes each carried a full source tree per
+	// child. Semantics:
+	//   0   → "use the default" (1, keep most-recent only)
+	//   1+  → literal keep count
+	//   -1  → disabled, retain everything (old behavior, for postmortem of
+	//         pre-existing runs or operators who explicitly want full history)
+	// Branches in git are NOT pruned by this — only the on-disk worktree
+	// directories. History stays reachable via
+	// `attractor/run/<runid>/parallel/<nodeID>/pass<N>/<key>` refs.
+	KeepParallelPasses int
+
 	// Optional provider-level model overrides (provider -> model id).
 	// When set, the forced model is used for execution and bypasses model-catalog
 	// membership validation for that provider.

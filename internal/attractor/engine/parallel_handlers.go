@@ -47,6 +47,107 @@ const (
 	parallelMergeModeManualBox  = "manual_box_fan_in"
 )
 
+// dirSizeBytes walks a directory tree and sums regular-file sizes.
+// Returns 0 on any traversal error — best-effort only, used for reporting.
+func dirSizeBytes(root string) int64 {
+	var total int64
+	_ = filepath.Walk(root, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.Mode().IsRegular() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
+}
+
+// pruneOldParallelPasses removes on-disk worktree directories for prior passes
+// of a fan-out node, keeping the most-recent `keep` passes. Called at the START
+// of each new fan-out dispatch (i.e., before spawning passN's child worktrees).
+//
+// Behavior:
+//   - keep is resolved from Options.KeepParallelPasses: 0→1 (default), -1→disabled, ≥1→literal.
+//   - For each `pass<N>` dir under `<logsRoot>/parallel/<nodeID>/` where N + keep ≤ currentPass:
+//     each child `MM-<key>/worktree` is unregistered via GitOps.RemoveWorktree (if available),
+//     then os.RemoveAll wipes the entire passN directory.
+//   - Git branches are NOT deleted — they remain reachable for postmortem.
+//   - Emits a `parallel_pass_pruned` progress event per pruned pass with bytes_reclaimed.
+//   - Best-effort: errors are logged via warning event, not propagated.
+func (e *Engine) pruneOldParallelPasses(logsRoot, parallelNodeID string, currentPass int) {
+	if e == nil || strings.TrimSpace(logsRoot) == "" || strings.TrimSpace(parallelNodeID) == "" {
+		return
+	}
+	keep := e.Options.KeepParallelPasses
+	if keep == -1 {
+		return // explicitly disabled
+	}
+	if keep <= 0 {
+		keep = 1 // default
+	}
+	parallelRoot := filepath.Join(logsRoot, "parallel", parallelNodeID)
+	entries, err := os.ReadDir(parallelRoot)
+	if err != nil {
+		return // dir doesn't exist yet (first pass) → nothing to prune
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, "pass") {
+			continue
+		}
+		nStr := strings.TrimPrefix(name, "pass")
+		var n int
+		if _, perr := fmt.Sscanf(nStr, "%d", &n); perr != nil || n <= 0 {
+			continue
+		}
+		if n+keep > currentPass {
+			continue // recent enough to retain
+		}
+		passDir := filepath.Join(parallelRoot, name)
+		bytesReclaimed := dirSizeBytes(passDir)
+
+		// Best-effort unregister each child worktree from git BEFORE rm -rf.
+		// Skipping this leaves dangling entries that `git worktree list`
+		// reports as stale and `git worktree prune` would need to clean later.
+		if e.GitOps != nil {
+			childEntries, _ := os.ReadDir(passDir)
+			for _, child := range childEntries {
+				if !child.IsDir() {
+					continue
+				}
+				worktreeDir := filepath.Join(passDir, child.Name(), "worktree")
+				if _, statErr := os.Stat(worktreeDir); statErr == nil {
+					_ = e.GitOps.RemoveWorktree(e.Options.RepoPath, worktreeDir)
+				}
+			}
+		}
+
+		if rmErr := os.RemoveAll(passDir); rmErr != nil {
+			e.appendProgress(map[string]any{
+				"event":      "warning",
+				"message":    fmt.Sprintf("pruneOldParallelPasses: removing %s: %v", passDir, rmErr),
+				"node_id":    parallelNodeID,
+				"pruned_pass": n,
+			})
+			continue
+		}
+
+		e.appendProgress(map[string]any{
+			"event":           "parallel_pass_pruned",
+			"node_id":         parallelNodeID,
+			"pruned_pass":     n,
+			"current_pass":    currentPass,
+			"keep_passes":     keep,
+			"bytes_reclaimed": bytesReclaimed,
+			"pass_dir":        passDir,
+		})
+	}
+}
+
 func classifyJoinMergeMode(g *model.Graph, joinID string) string {
 	if g == nil {
 		return parallelMergeModeManualBox
@@ -215,6 +316,15 @@ func dispatchParallelBranches(
 	// produces a unique branch name (pass1, pass2, …) that is independently
 	// reviewable in git.
 	passNum := exec.Engine.nextParallelPassCount(sourceNodeID)
+
+	// Prune old fan-out passes BEFORE spawning the new one. Without this,
+	// each re-entry of a fan-out node leaves a full set of child worktrees
+	// behind in parallel/<id>/pass<N>/, growing the on-disk footprint
+	// monotonically (one observed run hit 267G across 9 passes). Default
+	// keep is 1 (most-recent only). Per-pass git branches are NOT deleted —
+	// they remain reachable for postmortem via
+	// attractor/run/<runid>/parallel/<id>/pass<N>/<key>.
+	exec.Engine.pruneOldParallelPasses(exec.LogsRoot, sourceNodeID, passNum)
 
 	maxParallel := parseInt(sourceNode.Attr("max_parallel", ""), 4)
 	if maxParallel <= 0 {

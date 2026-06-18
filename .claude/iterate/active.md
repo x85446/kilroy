@@ -71,7 +71,19 @@ fixing whatever new kilroy bugs surface on darkfactory along the way.
 No project oracle.md found at `./.claude/data/oracle.md`. Global oracle at `~/.claude/skills/oracle/known.md` is empty (no buzzword index entries). Planned without oracle augmentation.
 
 ## Decisions log
-(empty until execution)
+
+2026-06-18T05:18:00Z — Design note for the fix:
+
+- **Cleanup hook location**: at the START of `dispatchParallelBranches()` in `internal/attractor/engine/parallel_handlers.go` (~line 218), immediately after `passNum := exec.Engine.nextParallelPassCount(sourceNodeID)`. Prune passes with `pass_number ≤ passNum - keep` BEFORE spawning the new pass's worktrees. Rationale:
+  - Prior pass results are already merged into `exec.WorktreeDir` (via fan-in / box-join in the previous tick of the engine loop), so the on-disk worktrees of older passes contain no in-flight or unmerged state.
+  - Pre-pass pruning is idempotent on resume: whatever pass starts next handles cleanup; no need to persist cleanup state.
+  - The engine loop is single-threaded between fan-out invocations, so there is no concurrency hazard inside `dispatchParallelBranches`.
+- **Default retention**: `1` — keep only the most-recent fan-out pass on disk. Older passes are still recoverable from git via the `attractor/run/<runid>/parallel/<nodeID>/passN/<key>` branches that the engine creates per-pass. Decision: branches themselves are NOT deleted by this pass-cleanup — only the on-disk worktree dirs are removed. This preserves git history for postmortem/inspection while reclaiming the bulk of the disk (worktrees are the bloat, branches are cheap).
+- **CLI flag name**: `--keep-parallel-passes <N>` on both `attractor run` and `attractor resume`. Threaded through `engine.RunOptions.KeepParallelPasses int` (0 means "use default of 1"; -1 means "disabled — old retain-everything behavior"; ≥1 means literal keep count). Default at the CLI layer is 1.
+- **Helper function**: `func (e *Engine) pruneOldParallelPasses(logsRoot, parallelNodeID string, currentPass, keep int)` lives in `parallel_handlers.go`. Walks `logsRoot/parallel/<nodeID>/` for `pass<N>` dirs, for each `N` where `N + keep <= currentPass`: enumerates child `MM-<key>/worktree` subdirs, calls `GitOps.RemoveWorktree(repoPath, worktree)` to unregister from git, then `os.RemoveAll(passDir)` to free disk. Emits a `parallel_pass_pruned` progress event with `node_id`, `pruned_pass`, `bytes_reclaimed`, `keep_passes`.
+- **No deletion of branch refs**: deferred — refs are cheap, the bloat is worktrees. If a future need to prune refs arises, the entry point is the same helper.
 
 ## Status / Log
-(empty until execution)
+
+2026-06-18T05:15:00Z — Step 1 design investigation complete; moving to implementation.
+2026-06-18T05:18:00Z — Step 2: implementing helper + wiring CLI flag.

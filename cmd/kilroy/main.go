@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -224,6 +225,7 @@ func attractorRun(args []string) {
 	var confirmStaleBuild bool
 	var noCXDB bool
 	var noStageArchiveStacking bool
+	var keepParallelPasses int // 0 = use engine default (1), -1 = disabled, ≥1 = literal
 	var skipCLIHeadlessWarning bool
 	var forceModelSpecs []string
 	var inputPath string
@@ -250,6 +252,22 @@ func attractorRun(args []string) {
 			noCXDB = true
 		case "--no-stage-archive-stacking":
 			noStageArchiveStacking = true
+		case "--keep-parallel-passes":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "--keep-parallel-passes requires an integer value (-1 to disable, 0 to use default, ≥1 for literal keep count)")
+				os.Exit(1)
+			}
+			v, perr := strconv.Atoi(args[i])
+			if perr != nil {
+				fmt.Fprintf(os.Stderr, "--keep-parallel-passes: not an integer: %q\n", args[i])
+				os.Exit(1)
+			}
+			if v < -1 {
+				fmt.Fprintln(os.Stderr, "--keep-parallel-passes: minimum value is -1 (disabled)")
+				os.Exit(1)
+			}
+			keepParallelPasses = v
 		case skipCLIHeadlessWarningFlag:
 			skipCLIHeadlessWarning = true
 		case "--force-model":
@@ -509,6 +527,9 @@ func attractorRun(args []string) {
 		if noStageArchiveStacking {
 			childArgs = append(childArgs, "--no-stage-archive-stacking")
 		}
+		if keepParallelPasses != 0 {
+			childArgs = append(childArgs, "--keep-parallel-passes", strconv.Itoa(keepParallelPasses))
+		}
 		if inputPath != "" && !strings.HasPrefix(strings.TrimSpace(inputPath), "{") {
 			if abs, err := filepath.Abs(inputPath); err == nil {
 				inputPath = abs
@@ -602,6 +623,7 @@ func attractorRun(args []string) {
 			AllowTestShim:          allowTestShim,
 			DisableCXDB:            noCXDB,
 			NoStageArchiveStacking: noStageArchiveStacking,
+			KeepParallelPasses:     keepParallelPasses,
 			ForceModels:            forceModels,
 			Registry:               newLayeredRegistry(useTmux),
 			GitOps:                 gitOps,
@@ -661,6 +683,7 @@ func attractorRun(args []string) {
 		AllowTestShim:          allowTestShim,
 		DisableCXDB:            noCXDB,
 		NoStageArchiveStacking: noStageArchiveStacking,
+		KeepParallelPasses:     keepParallelPasses,
 		SkipPreflight:          skipPreflight,
 		ForceModels:            forceModels,
 		Registry:               newLayeredRegistry(useTmux),
@@ -1021,10 +1044,27 @@ func attractorResume(args []string) {
 	var runBranch string
 	var repoPath string
 	var noStageArchiveStacking bool
+	var keepParallelPasses int // 0 = engine default, -1 = disabled, ≥1 = literal
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--no-stage-archive-stacking":
 			noStageArchiveStacking = true
+		case "--keep-parallel-passes":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "--keep-parallel-passes requires an integer value (-1 to disable, 0 to use default, ≥1 for literal keep count)")
+				os.Exit(1)
+			}
+			v, perr := strconv.Atoi(args[i])
+			if perr != nil {
+				fmt.Fprintf(os.Stderr, "--keep-parallel-passes: not an integer: %q\n", args[i])
+				os.Exit(1)
+			}
+			if v < -1 {
+				fmt.Fprintln(os.Stderr, "--keep-parallel-passes: minimum value is -1 (disabled)")
+				os.Exit(1)
+			}
+			keepParallelPasses = v
 		case "--logs-root":
 			i++
 			if i >= len(args) {
