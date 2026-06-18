@@ -87,3 +87,14 @@ No project oracle.md found at `./.claude/data/oracle.md`. Global oracle at `~/.c
 
 2026-06-18T05:15:00Z — Step 1 design investigation complete; moving to implementation.
 2026-06-18T05:18:00Z — Step 2: implementing helper + wiring CLI flag.
+2026-06-18T05:35:00Z — Steps 2/3/4 done.
+  - `engine.RunOptions.KeepParallelPasses int` added (engine.go); 0→default(1), -1→disabled, ≥1→literal.
+  - `ResumeOverrides.KeepParallelPasses` added + threaded into opts (resume.go).
+  - `pruneOldParallelPasses` helper + `dirSizeBytes` added (parallel_handlers.go).
+  - Call site inserted right after `nextParallelPassCount` in `dispatchParallelBranches`.
+  - `--keep-parallel-passes <n>` flag parser added to both `attractor run` and `attractor resume`; child-args propagation added for `--detach` path.
+  - Usage strings updated for run + resume.
+  - 5 new unit tests in `parallel_pass_cleanup_test.go` — ALL PASS.
+  - Pre-existing parallel integration test failures (terminal_condition_edge on fixture .dot files) confirmed unchanged on `main`; NOT caused by my changes.
+  - `go build ./cmd/kilroy` → clean.
+  - `./kilroy attractor 2>&1 | grep keep-parallel` confirms flag visible in both usages.
