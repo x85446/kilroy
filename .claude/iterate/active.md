@@ -3,7 +3,7 @@
 Started: 2026-06-18T05:10:00Z (planned), executing from 2026-06-18T05:15:00Z
 CWD: /Users/travis/workspace/x85446/kilroy
 phase: executing
-running: 2026-06-18T05:15:00Z
+running: false
 planner: iterate-planner
 loop_job: 3ee70191
 
@@ -87,6 +87,20 @@ No project oracle.md found at `./.claude/data/oracle.md`. Global oracle at `~/.c
 
 2026-06-18T05:15:00Z — Step 1 design investigation complete; moving to implementation.
 2026-06-18T05:18:00Z — Step 2: implementing helper + wiring CLI flag.
+2026-06-18T06:45:00Z — Monitor tick: run active in expand_spec (5s lag), disk 6%, no failures. No intervention needed.
+2026-06-18T06:46:30Z — Monitor tick: still in expand_spec (LLM streaming, 55s since last event — normal silence), unit active, disk 6%.
+2026-06-18T06:47:30Z — Tick: still expand_spec, event count 26 (heartbeat advance), disk 6%, no failures.
+2026-06-18T06:48:30Z — Tick: still expand_spec (~9min in), events 27, disk 6%, healthy.
+2026-06-18T06:49:30Z — Tick: progress! expand_spec done, check_dod done (needs_dod), in dod_fanout (branch dod_c). 88 events, 1s lag, disk 6%.
+2026-06-18T06:50:30Z — Tick: dod_fanout/dod_c, 181 events (+93/min), disk 6%, healthy.
+2026-06-18T06:40:00Z — Steps 5/6/7 done.
+  - Commit 4d3ded2 pushed to origin/main with the test file + final main.go wiring.
+  - kilroyHelp: cmd_build_install now verifies BOTH --no-stage-archive-stacking and --keep-parallel-passes on run + resume.
+  - kilroyHelp: new `_keep_parallel_passes_flag()` probe added (mirrors _stacking_flag pattern); cmd_run and cmd_resume now pass `--keep-parallel-passes 1` (default; KILROY_KEEP_PASSES env var overrides) and emit a "lacks" banner when binary is too old.
+  - darkfactorySetup.sh deploy: kilroy 0.1.0+4d3ded2.main.dirty (the .dirty is from continuous active.md heartbeat — expected, the iterator is mid-execution).
+  - Fresh run launched: run-20260618T063934Z with cmdline `kilroy attractor run ... --no-stage-archive-stacking --keep-parallel-passes 1`. Confirmed both flags present.
+  - status: active, events 9s ago, in expand_spec; disk 6% used.
+  - First launch attempt failed because `bash -lc` started at $HOME not at $PWD — wrote REPO=/home/travis instead of /home/travis/work/izcrOS. Retried with explicit `cd ~/work/izcrOS && kilroyHelp launch run` → success. Not a kilroy bug, not a kilroyHelp bug per se — `kilroyHelp launch run` correctly uses `$PWD`. Worth a future kilroyHelp safety check ("refuse to launch if PWD does not contain pipeline.dot"), filed mentally for later.
 2026-06-18T05:35:00Z — Steps 2/3/4 done.
   - `engine.RunOptions.KeepParallelPasses int` added (engine.go); 0→default(1), -1→disabled, ≥1→literal.
   - `ResumeOverrides.KeepParallelPasses` added + threaded into opts (resume.go).
