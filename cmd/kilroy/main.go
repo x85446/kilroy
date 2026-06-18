@@ -164,8 +164,8 @@ func graphDeclaredInputs(dotSource []byte) bool {
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:")
 	fmt.Fprintln(os.Stderr, "  kilroy --version")
-	fmt.Fprintln(os.Stderr, "  kilroy [--env-file <path>] attractor run (--graph <file.dot> | --package <dir>) [--tmux] [--detach] [--validate|--preflight|--test-run] [--skip-preflight] [--allow-test-shim] [--confirm-stale-build] [--no-cxdb] [--no-stage-archive-stacking] [--force-model <provider=model>] [--config <run.yaml>] [--run-id <id>] [--logs-root <dir>] [--input <path|json>] [--prompt-file <file>] [--workspace <dir>] [--label KEY=VALUE ...]")
-	fmt.Fprintln(os.Stderr, "  kilroy attractor resume --logs-root <dir> [--no-stage-archive-stacking]")
+	fmt.Fprintln(os.Stderr, "  kilroy [--env-file <path>] attractor run (--graph <file.dot> | --package <dir>) [--tmux] [--detach] [--validate|--preflight|--test-run] [--skip-preflight] [--allow-test-shim] [--confirm-stale-build] [--no-cxdb] [--no-stage-archive-stacking] [--keep-parallel-passes <n>] [--force-model <provider=model>] [--config <run.yaml>] [--run-id <id>] [--logs-root <dir>] [--input <path|json>] [--prompt-file <file>] [--workspace <dir>] [--label KEY=VALUE ...]")
+	fmt.Fprintln(os.Stderr, "  kilroy attractor resume --logs-root <dir> [--no-stage-archive-stacking] [--keep-parallel-passes <n>]")
 	fmt.Fprintln(os.Stderr, "  kilroy attractor resume --cxdb <http_base_url> --context-id <id>")
 	fmt.Fprintln(os.Stderr, "  kilroy attractor resume --run-branch <attractor/run/...> [--repo <path>]")
 	fmt.Fprintln(os.Stderr, "  kilroy attractor status [--logs-root <dir> | --latest] [--json] [-v|--verbose] [--follow|-f] [--cxdb] [--raw] [--watch] [--interval <sec>]")
@@ -1117,9 +1117,10 @@ func attractorResume(args []string) {
 	)
 	switch {
 	case logsRoot != "":
-		if noStageArchiveStacking {
+		if noStageArchiveStacking || keepParallelPasses != 0 {
 			res, err = engine.ResumeWithOverrides(ctx, logsRoot, engine.ResumeOverrides{
-				NoStageArchiveStacking: true,
+				NoStageArchiveStacking: noStageArchiveStacking,
+				KeepParallelPasses:     keepParallelPasses,
 			})
 		} else {
 			res, err = engine.Resume(ctx, logsRoot)
