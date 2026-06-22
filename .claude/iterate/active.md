@@ -168,6 +168,10 @@ No project oracle.md found at `./.claude/data/oracle.md`. Global oracle at `~/.c
 2026-06-18T08:03:30Z — pass1 at 2.7G, branch implement_multicall_bins. 5693 events.
 2026-06-18T08:04:30Z — pass1 at 2.7G, branch implement_tests. 5807 events.
 2026-06-18T08:05:30Z — pass1 at 2.7G, branch implement_multicall_bins. 5933 events.
+2026-06-18T08:06:30Z — pass1 at 2.7G, branch implement_tests. 6009 events.
+2026-06-18T08:07:30Z — pass1 at 2.7G, branch implement_tests. 6041 events.
+2026-06-18T08:08:30Z — pass1 at 2.7G, branch implement_tests. 6070 events.
+2026-06-18T08:09:30Z — pass1 at 2.7G, branch implement_tests. 6103 events.
 2026-06-18T06:40:00Z — Steps 5/6/7 done.
   - Commit 4d3ded2 pushed to origin/main with the test file + final main.go wiring.
   - kilroyHelp: cmd_build_install now verifies BOTH --no-stage-archive-stacking and --keep-parallel-passes on run + resume.
@@ -187,3 +191,11 @@ No project oracle.md found at `./.claude/data/oracle.md`. Global oracle at `~/.c
   - Pre-existing parallel integration test failures (terminal_condition_edge on fixture .dot files) confirmed unchanged on `main`; NOT caused by my changes.
   - `go build ./cmd/kilroy` → clean.
   - `./kilroy attractor 2>&1 | grep keep-parallel` confirms flag visible in both usages.
+
+### Tick 2026-06-18T08:06:43Z
+
+- ssh darkfactory: run-20260618T063934Z still active, events 6186, branch implement_tests (35s idle, stage_heartbeat).
+- Pass1 size: 2.7G (steady — same as prior tick).
+- Disk: 7% / (20G used / 291G).
+- `parallel_pass_pruned`/`run_failed`/`run_completed` event count: 0 (expected — still in pass1).
+- No interventions needed. The prune helper will fire for the first time when implement_fanout starts pass2.
