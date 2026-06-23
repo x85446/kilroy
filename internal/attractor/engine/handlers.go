@@ -1041,6 +1041,18 @@ func (h *ToolHandler) Execute(ctx context.Context, execCtx *Execution, node *mod
 			} else if line := firstActionableToolOutputLine(stdoutBytes); line != "" {
 				failureReason = line
 			}
+		} else {
+			// Non-browser tool nodes: append the first actionable output line
+			// (the real error, e.g. `error[E0560]: ...`) to the bare exit
+			// status. The deterministic-cycle signature is derived from this
+			// reason — without the real error, every non-zero exit collapses to
+			// the same "exit status N" signature and the cycle-breaker aborts a
+			// fix loop that is actually making progress on DIFFERENT errors.
+			if line := firstActionableToolOutputLine(stderrBytes); line != "" {
+				failureReason = rawExitStatus + ": " + line
+			} else if line := firstActionableToolOutputLine(stdoutBytes); line != "" {
+				failureReason = rawExitStatus + ": " + line
+			}
 		}
 		if failureReason == "" {
 			failureReason = "tool command failed"
@@ -1154,7 +1166,14 @@ func looksActionableToolOutputLine(line string) bool {
 // repo. Returns "" when no hint applies.
 func worktreeNotFoundHint(stderr []byte, cmdStr string, execCtx *Execution) string {
 	stderrStr := strings.ToLower(string(stderr))
-	if !strings.Contains(stderrStr, "not found") && !strings.Contains(stderrStr, "no such file") {
+	// Only fire for SHELL/EXEC-level "missing file or command" signatures — not
+	// a bare "not found" substring. Compilers emit "method not found in `T`",
+	// "cannot find value `x` ... not found in this scope", etc. for ordinary
+	// code errors, which have nothing to do with an uncommitted file. Matching
+	// generic "not found" there mislabels real build failures as git problems.
+	if !strings.Contains(stderrStr, "no such file or directory") &&
+		!strings.Contains(stderrStr, ": not found") && // e.g. "sh: 1: scripts/x.sh: not found"
+		!strings.Contains(stderrStr, "command not found") {
 		return ""
 	}
 	repoPath := ""
@@ -1162,10 +1181,12 @@ func worktreeNotFoundHint(stderr []byte, cmdStr string, execCtx *Execution) stri
 		repoPath = execCtx.Engine.Options.RepoPath
 	}
 
-	// Try to extract a script path from the command (first token of the command).
+	// Identify the referenced script. If we can't, don't guess — emitting a
+	// generic "not committed to git" hint on every failure is actively
+	// misleading (it sends operators chasing a non-existent git problem).
 	scriptPath := extractLeadingPath(cmdStr)
 	if scriptPath == "" {
-		return "file not found — if this script is not committed to git, run 'git add <file> && git commit' in the source repo"
+		return ""
 	}
 
 	worktreeDir := ""
@@ -1173,16 +1194,17 @@ func worktreeNotFoundHint(stderr []byte, cmdStr string, execCtx *Execution) stri
 		worktreeDir = execCtx.WorktreeDir
 	}
 
-	// Check if the file exists in the source repo but not in the worktree.
+	// If the script IS present in the worktree, the failure is something else
+	// (it ran and exited non-zero) — no missing-file hint applies.
 	inWorktree := worktreeDir != "" && pathExists(filepath.Join(worktreeDir, scriptPath))
+	if inWorktree {
+		return ""
+	}
 	inRepo := repoPath != "" && pathExists(filepath.Join(repoPath, scriptPath))
-	if !inWorktree && inRepo {
+	if inRepo {
 		return fmt.Sprintf("file %q exists in the source repo but not in the worktree — it may not be committed to git; run 'git add %s && git commit'", scriptPath, scriptPath)
 	}
-	if !inWorktree && !inRepo {
-		return fmt.Sprintf("file %q not found in worktree or source repo — check the path in tool_command", scriptPath)
-	}
-	return ""
+	return fmt.Sprintf("file %q not found in worktree or source repo — check the path in tool_command", scriptPath)
 }
 
 // extractLeadingPath pulls the first token from a shell command, stripping
@@ -1201,17 +1223,38 @@ func extractLeadingPath(cmd string) string {
 			break
 		}
 	}
-	// Take the first whitespace-delimited token.
 	fields := strings.Fields(cmd)
-	if len(fields) == 0 {
+	// Skip a leading interpreter token (`sh`, `bash`, `python`, …) and any
+	// option flags after it, so `sh scripts/x.sh` resolves to the script path
+	// rather than to "sh". Without this, the first token is the interpreter and
+	// the path is never identified — the caller then emits a generic, wrong
+	// "not committed to git" hint.
+	i := 0
+	if i < len(fields) && isInterpreterToken(fields[i]) {
+		i++
+		for i < len(fields) && strings.HasPrefix(fields[i], "-") {
+			i++
+		}
+	}
+	if i >= len(fields) {
 		return ""
 	}
-	candidate := fields[0]
+	candidate := fields[i]
 	// Skip if it looks like a bare command (no path separator and no extension).
 	if !strings.Contains(candidate, "/") && !strings.Contains(candidate, ".") {
 		return ""
 	}
 	return candidate
+}
+
+// isInterpreterToken reports whether tok is a shell/script interpreter that
+// would be followed by the actual script path on the command line.
+func isInterpreterToken(tok string) bool {
+	switch tok {
+	case "sh", "bash", "dash", "zsh", "ksh", "python", "python3", "ruby", "perl", "node":
+		return true
+	}
+	return false
 }
 
 func resolveToolShellPath() string {
