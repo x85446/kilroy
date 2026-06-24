@@ -2,8 +2,9 @@
 
 Started: 2026-06-23T16:00:00Z (planned), re-planned 2026-06-23T21:30:00Z
 CWD: /Users/travis/workspace/x85446/kilroy
-phase: planned
-running: false
+phase: executing
+running: 2026-06-23T21:48:00Z
+loop_job: 3b486251
 
 ## Goal
 Settle whether kilroy's fan-out `parallel/` disk usage is a real pass-stacking bug or a false positive (with on-disk evidence), fix it in kilroy if real, reclaim darkfactory's full disk, then resume the run under the already-built usage gate and finish the live active-run E2E validation (stopsafe-on-live-unit, auto-resume, gate-started-by-launch, per-stage burn).
@@ -57,3 +58,36 @@ Settle whether kilroy's fan-out `parallel/` disk usage is a real pass-stacking b
 
 ## Status / Log
 2026-06-23T21:30:00Z — Plan re-opened to phase: planned with the disk-investigation + live-E2E steps. Awaiting `/iterate`.
+2026-06-23T21:40:00Z — STEP 1 forensics complete (read-only, evidence captured before reclaim):
+
+  Per fan-out node (parallel/): implement_fanout 111G, analyze_fanout 79G, plan_fanout 34G, dod_fanout 6.3M.
+
+  Retained passes per node (pass<N> dirs on disk NOW):
+    implement_fanout: pass14 ONLY (1 pass). 9 branches × ~13G = 111G for ONE pass.
+    analyze_fanout:   pass1 (56G) + pass2 (23G)   = 2 passes.
+    plan_fanout:      pass1 (25G) + pass2 (9.9G)  = 2 passes.
+    dod_fanout:       pass1 (6.3M).
+
+  parallel_pass_pruned events: 19 total. implement_fanout pruned passes 1–13 (1–4 pruned
+  TWICE = resume re-materialization signature); only pass14 survives. analyze_fanout pass1
+  pruned (18G, current=2); plan_fanout pass1 pruned (7G, current=2).
+
+  Prune code (`pruneOldParallelPasses`, parallel_handlers.go:78): condition `n+keep>currentPass`
+  → with keep=1 removes all but newest. Called ONLY at each node's next fan-out dispatch
+  (line 327). Correct. No re-materialization code found in the resume path.
+
+  VERDICT: FALSE-POSITIVE on catastrophic "stacking" — the user was right. The keep=1 prune
+  WORKS: the historical 267G monster (implement_fanout) retained exactly 1 of 14 passes. The
+  224G is dominated by the LEGITIMATE size of a single fan-out pass — izcrOS branch worktrees
+  are ~13G each (full checkout + Rust target) × 9 branches = 111G for ONE implement pass. That
+  is inherent to izcrOS, not a kilroy stacking bug. Arithmetic: implement 9×13G≈111G (1 pass) ✓.
+
+  GENUINE MINOR RESIDUAL (real, but not the alarm): completed low-churn fan-out nodes (analyze,
+  plan) show 2 passes. Their pass1 was pruned on the original run (events prove it), but a later
+  resume re-ran/re-created those passes, and because the existing prune only fires at a node's
+  NEXT dispatch — and completed nodes never re-dispatch — the leftover old pass is never re-pruned
+  (~81G stale here: analyze pass1 56G + plan pass1 25G). Fix in step 2: a startup sweep that prunes
+  stale passes across ALL parallel/<node> dirs (not just the one being dispatched), so resume
+  leftovers can't accumulate. Low-risk: reuses the proven prune helper, only removes non-newest passes.
+2026-06-23T21:48:00Z — STEP 2 done. Implemented `pruneAllParallelPassesAtStartup` + `highestParallelPass` (parallel_handlers.go), wired into run/resume entry (engine.go:631). 2 new + 5 existing prune tests PASS; `go build ./cmd/kilroy` clean. Pre-existing `terminal_condition_edge` fixture failures unrelated (unchanged on main). Committed 28199a7.
+2026-06-23T21:49:00Z — STEP 3: reclaiming disk on darkfactory (user-authorized) — removing run-20260618T063934Z/{parallel,run.tgz,run.tgz.tmp}; keeping worktree + metadata for resume.
