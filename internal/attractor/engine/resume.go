@@ -296,6 +296,18 @@ func resumeFromLogsRoot(ctx context.Context, logsRoot string, ov ResumeOverrides
 	eng.baseLogsRoot, eng.restartCount = restoreRestartState(logsRoot, cp)
 
 	// Resume enters via runLoop directly, bypassing run() where the fresh-run
+	// RunLog is created — so without this, eng.RunLog stays nil for the whole
+	// resumed run and run.log is never appended to: node.completed (and every
+	// other RunLog event) is silently dropped, leaving run.log frozen at the
+	// pre-resume state. Anything that tails run.log for progress (operator
+	// `attractor status`, stopsafe, the usage-gate) then goes blind on resumes.
+	// Create it here too, mirroring engine.go's fresh-run init (O_APPEND).
+	if rl, rlErr := NewRunLog(logsRoot, runID); rlErr == nil {
+		eng.RunLog = rl
+		defer eng.RunLog.Close()
+	}
+
+	// Resume enters via runLoop directly, bypassing run() where the fresh-run
 	// startup sweep lives — so prune stale parallel passes here too. This is
 	// exactly where re-materialized / prior-segment passes accumulate on
 	// completed fan-out nodes that never re-dispatch. Honors KeepParallelPasses.
