@@ -1,63 +1,59 @@
-# Iterate Task — config-driven usage gate + auto-resume for kilroyHelp launch
+# Iterate Task — finish usage-gate live E2E + investigate/fix (or clear) disk-stacking
 
-Started: 2026-06-23T16:00:00Z (planned), executing from 2026-06-23T21:06:40Z
+Started: 2026-06-23T16:00:00Z (planned), re-planned 2026-06-23T21:30:00Z
 CWD: /Users/travis/workspace/x85446/kilroy
-phase: executing
-running: 2026-06-23T21:06:40Z
-loop_job: f68157bc
+phase: planned
+running: false
 
 ## Goal
-Add a config-file-driven, usage-aware gate to `kilroyHelp launch run/resume/stopsafe` that, at each safe stage boundary, reads a darkfactory-local config file plus Anthropic's `/api/oauth/usage` and parks or resumes the kilroy run to stay within a time-scaled 5-hour burn envelope and a weekly daily-pace guard — with operator modes (logical | stopnext | burnout), opt-in burnout near the weekly reset, and automatic resume once the windows clear.
+Settle whether kilroy's fan-out `parallel/` disk usage is a real pass-stacking bug or a false positive (with on-disk evidence), fix it in kilroy if real, reclaim darkfactory's full disk, then resume the run under the already-built usage gate and finish the live active-run E2E validation (stopsafe-on-live-unit, auto-resume, gate-started-by-launch, per-stage burn).
 
 ## Steps
 
-1. Add `_probe_usage` to kilroyHelp (`/Users/travis/workspace/x85446/creds/kilroyHelp`): read the OAuth `access_token` from cli-proxy-api's auth file (`~/.cli-proxy-api/claude-*.json`) into a variable that is NEVER printed, `GET https://api.anthropic.com/api/oauth/usage` with `Authorization: Bearer <token>` + `anthropic-beta: oauth-2025-04-20`, and parse the body into `USAGE_5H_PCT`, `USAGE_5H_RESET`, `USAGE_7D_PCT`, `USAGE_7D_RESET`. Re-read the token file on every call so cli-proxy-api's background refresh is picked up; treat HTTP 401 as "token stale, retry next tick" (no crash). Add a `kilroyHelp usage` subcommand that prints the four values + HTTP status.
+1. Forensically investigate `run-20260618T063934Z/parallel/` on darkfactory BEFORE deleting anything (it is the only evidence). Capture: total size; the list of fan-out node dirs under `parallel/` and, for the largest, every `pass<N>/` subdir with its size and the count of distinct passes retained; per-branch (`MM-<key>/worktree`) sizes within one pass; the run's launch cmdline (does it carry `--keep-parallel-passes 1`?); and the count + summed `bytes_reclaimed` of `parallel_pass_pruned` events in `progress.ndjson`. Read kilroy's `pruneOldParallelPasses` + its call site in `internal/attractor/engine/parallel_handlers.go` and the resume path. Reach a verdict: genuine stacking (multiple un-pruned passes retained on disk) vs false-positive (≤`keep` passes whose size is legitimately large, e.g. many fan-out branches × big worktrees, or resume re-materialization).
 
-2. Add the gate config file + loader. Default path `/etc/kilroy-usage-gate.conf`, env-style `KEY=value`, auto-created with documented defaults when absent. Keys: `MODE` (logical|stopnext|burnout), `T5H_ANCHOR_H1=50`, `T5H_ANCHOR_H5=80`, `FRESH_RUN_CAP=85`, `WEEKLY_PACE_MULT=2.0`, `WEEKLY_CEILING=90`, `BURNOUT_WINDOW_H=5`, `BURNOUT_ARMED=0`, `POLL_INTERVAL_S=120`. `_load_gate_config` re-sources the file on EVERY call so an on-disk edit takes effect at the next read — no restart. Add `kilroyHelp gate --show-config`.
+2. Resolve per the verdict. If genuine stacking: fix it in kilroy source (Prime Directive) so that after N passes only `keep` passes remain on disk, add/extend a test that asserts the on-disk pass count, and build. If false-positive: record the true root cause with the disk arithmetic that explains the total from ≤`keep` passes, and make no code change.
 
-3. Implement the threshold math as pure functions. `_threshold_5h(h)` = clamp(`T5H_ANCHOR_H1` + (`T5H_ANCHOR_H5`−`T5H_ANCHOR_H1`)/4·(h−1), `T5H_ANCHOR_H1`, `T5H_ANCHOR_H5`). `_threshold_7d(d)` = min(`WEEKLY_CEILING`, `WEEKLY_PACE_MULT`·(d/7)·100). Elapsed time derived from the API reset times: `window_start = reset − span`, `h`/`d` = now − window_start, clamped to the span. Add `kilroyHelp gate --selftest` that prints and asserts both threshold tables.
+3. Reclaim darkfactory disk so a live run has headroom: remove the failed run's bulky artifacts (`parallel/`, `run.tgz`, `run.tgz.tmp`), keeping cheap metadata (`progress.ndjson`, `checkpoint.json`, `run.log`).
 
-4. Implement `_gate_decide` → `ALLOW` / `PARK <reason>` from current usage + loaded config + mode. Logic: `MODE=stopnext` → PARK; burnout active (`MODE=burnout`, OR `BURNOUT_ARMED=1` and time-to-weekly-reset ≤ `BURNOUT_WINDOW_H`h) → ALLOW unconditionally; else `MODE=logical` → PARK if `USAGE_5H_PCT > _threshold_5h(h)` OR `USAGE_7D_PCT > _threshold_7d(d)` OR `USAGE_7D_PCT > WEEKLY_CEILING`, else ALLOW. Honor test-injection env (`GATE_TEST_5H`, `GATE_TEST_7D`, `GATE_TEST_7D_RESET`) so verdicts are unit-checkable. Add `kilroyHelp gate --check`.
+4. If step 2 produced a kilroy fix, redeploy it to darkfactory via `darkfactorySetup.sh` and confirm the version stamp matches local HEAD; if no fix was needed, skip (and note the skip).
 
-5. Implement the gate watcher loop (`kilroyHelp gate run`): tail the active run's `progress.ndjson` for top-level `node.completed` (the safe stop points); on each, re-load config, probe usage, call `_gate_decide`; on PARK → `kilroyHelp launch stopsafe` and record parked-state; log every evaluation (ts, node, h, d, util_5h, util_7d, T5h, T7d, mode, verdict, per-stage util-delta) to `/var/log/kilroy-usage-gate.log` (fallback `~/kilroy-usage-gate.log`). While parked, keep polling every `POLL_INTERVAL_S`; when `_gate_decide` → ALLOW, `kilroyHelp launch resume`. Never act mid-stage.
+5. Resume the run under the gate and confirm the gate runs against a LIVE unit: `kilroyHelp launch resume` starts BOTH the `kilroy-run.service` unit and the usage-gate daemon; the gate logs a real `eval@completion#` evaluation while the unit is active.
 
-6. Wire the gate into `launch`: `launch run`/`resume` also start the gate loop alongside the run (systemd `kilroy-usage-gate.service` if available, else `nohup`), and refuse a *fresh* `launch run` when `USAGE_5H_PCT ≥ FRESH_RUN_CAP` (unless burnout) with a clear message. `stopsafe` stays the actuator. Register `gate` + `usage` in `KILROYHELP_ACTIONS` and dispatch. Preserve the existing 5-second post-launch auto-status.
+6. Exercise stopsafe-on-active + auto-resume live, watching disk stays bounded: set `MODE=stopnext` in `/etc/kilroy-usage-gate.conf` and confirm the gate parks the ACTIVE run at the next `node.completed` (unit goes inactive); restore `MODE=logical` and confirm the gate auto-resumes (unit active again).
 
-7. Burnout auto-arm + safety. In `logical` mode, when `BURNOUT_ARMED=1` and the weekly reset is within `BURNOUT_WINDOW_H` hours, the gate logs "burnout armed — bypassing limits" and ALLOWs everything; `BURNOUT_WINDOW_H=10` extends coverage to the last two 5h blocks. With `BURNOUT_ARMED=0` (default) full limits hold right up to reset. Burnout is opt-in only — never self-enables without the armed flag or explicit `MODE=burnout`.
-
-8. Deploy + document. Save kilroyHelp to creds, `scp` to `/opt/darkfactory/scripts/kilroyHelp`, `bash -n` syntax check, ensure `/etc/kilroy-usage-gate.conf` exists with defaults on darkfactory, and document the config file, the three modes, and the burnout opt-in in kilroyHelp help text and `docs/resume.md`. Have the gate log per-stage util-burn so the 50@1h / 80@5h anchors can be calibrated from real data later.
+7. Confirm per-stage burn logging: let the gated run advance through ≥2 top-level `node.completed` under `MODE=logical` and confirm the gate records a numeric `stage_burn=±X.X` delta on the 2nd+ evaluation.
 
 ## Validation
 
-1. `ssh darkfactory kilroyHelp usage` returns HTTP 200 and prints a `five_hour` utilization within ±3 points of the Mac statusline's current `rate_limits.five_hour.used_percentage` (cross-check `/tmp/sessiondata`), plus parseable `resets_at` for both the 5h and 7d windows. A deliberately stale token yields a logged "401 retry next tick", not a crash.
+1. The Decisions log contains: a per-pass size breakdown table (`pass<N>` → size, with the retained-pass count) for the largest fan-out node, the `parallel_pass_pruned` event count + summed bytes, the run cmdline line showing whether `--keep-parallel-passes` was present, and a one-line `VERDICT: stacking-bug | false-positive` justified by those numbers. Captured by `grep -A1 "VERDICT:" .claude/iterate/active.md` returning non-empty.
 
-2. Delete `/etc/kilroy-usage-gate.conf` on darkfactory and run `kilroyHelp gate --show-config` → the file is recreated with all documented keys and `MODE=logical`. Then edit `MODE=stopnext` on disk and re-run `kilroyHelp gate --show-config` → output shows `stopnext` with no process restart.
+2. EITHER (genuine): `git diff main -- internal/attractor/engine/` shows a concrete prune fix AND `go test ./internal/attractor/engine/... -run Parallel -count=1` exits 0 with a test that asserts only `keep` pass dirs remain on disk after N passes; OR (false-positive): the Decisions log states the root cause with arithmetic (retained-pass-count × per-pass size ≈ observed total) and `git diff` shows no engine change. Exactly one branch is satisfied and recorded.
 
-3. `ssh darkfactory kilroyHelp gate --selftest` exits 0, printing the 5h table (h=0.5,1,2,3,4,5 → 50,50,57.5,65,72.5,80) and the weekly table (d=1,2,4 → 28.57,57.14,90-capped), each asserted equal to expected.
+3. `ssh darkfactory "df -h / | awk 'NR==2{print \$5}'"` reports usage < 50% (≥150G free) after reclaim.
 
-4. `kilroyHelp gate --check` with injected values returns the right verdict for each: (i) `GATE_TEST_5H=60` at h≈2 → PARK (5h>57.5); (ii) `GATE_TEST_5H=40 GATE_TEST_7D=20` at h≈2 → ALLOW; (iii) `GATE_TEST_7D=85` on day 1 → PARK (weekly pace); (iv) `MODE=stopnext` → PARK regardless; (v) `MODE=burnout GATE_TEST_5H=99` → ALLOW; (vi) `BURNOUT_ARMED=1` + `GATE_TEST_7D_RESET` 3h out + `GATE_TEST_5H=99` → ALLOW. Wrapper exits 0 on all-match.
+4. If a fix was made: `ssh darkfactory "kilroy --version"` prints `0.1.0+<sha>.*` where `<sha>` matches `git -C ~/workspace/x85446/kilroy rev-parse --short HEAD`. If no fix: the Status log explicitly records "no kilroy change — redeploy skipped".
 
-5. Start `kilroyHelp gate run` against the resumed live run on darkfactory; `tail /var/log/kilroy-usage-gate.log` shows ≥1 `node.completed` evaluation line carrying real `util_5h`/`util_7d`, computed `T5h`/`T7d`, mode, and a verdict. Inject `GATE_TEST_5H=99` → within one `POLL_INTERVAL_S` the gate calls `stopsafe` and `kilroyHelp status` shows the unit parked; clear the injection → within one poll it `resume`s and `status` shows active again.
+5. After `kilroyHelp launch resume`: `ssh darkfactory kilroyHelp gate --status` shows `gate: running (pid <n>)`; `~/kilroy-usage-gate.log` (or `/var/log/kilroy-usage-gate.log`) contains an `eval@completion#` line timestamped after the resume; and `ssh darkfactory "systemctl is-active kilroy-run.service"` returned `active` at/after that eval.
 
-6. `ssh darkfactory "cd ~/work/izcrOS && kilroyHelp launch resume"` starts BOTH the run unit and the gate; `kilroyHelp launch status` (and `kilroyHelp gate --status`) shows the gate running with the current mode + live thresholds; the 5-second auto-status fires. With `GATE_TEST_5H=99` a fresh `kilroyHelp launch run` is refused citing "5h 99% ≥ cap 85", and is allowed when `MODE=burnout`.
+6. With `MODE=stopnext`: the gate log shows `PARK -> launch stopsafe` and within one cycle `systemctl is-active kilroy-run.service` returns non-active. After restoring `MODE=logical`: the log shows `-> launch resume` and `systemctl is-active kilroy-run.service` returns `active` again. `ssh darkfactory "df -h / | awk 'NR==2{print \$5}'"` stays < 80% throughout.
 
-7. `GATE_TEST_7D_RESET` 3h out + `BURNOUT_ARMED=1` + `GATE_TEST_5H=99` → `kilroyHelp gate --check` returns ALLOW and the log records "burnout armed"; flip `BURNOUT_ARMED=0` on disk → next `gate --check` returns PARK. `BURNOUT_WINDOW_H=10` + reset 8h out → ALLOW (two-block coverage); `BURNOUT_WINDOW_H=5` + reset 8h out → PARK.
-
-8. `bash -n /opt/darkfactory/scripts/kilroyHelp` exits 0; `/etc/kilroy-usage-gate.conf` exists with every documented key; editing `MODE` on disk changes the next `gate --check` verdict with no restart; `docs/resume.md` describes the config file, the three modes, and the burnout opt-in; the gate log contains per-stage util-delta entries after ≥2 stage completions.
+7. `~/kilroy-usage-gate.log` (or `/var/log/...`) shows ≥2 `eval@completion#` lines under `MODE=logical`, the second-or-later carrying a numeric `stage_burn=` value (not `n/a`).
 
 ## Constraints
-- kilroyHelp is UNVERSIONED at `/Users/travis/workspace/x85446/creds/kilroyHelp` — edit in place and deploy via `scp` to `/opt/darkfactory/scripts/kilroyHelp`. Never commit it to the kilroy repo.
-- The config file is the single source of truth, re-read at every stage boundary; on-disk edits at darkfactory take effect at the next stage with NO restart. Default path `/etc/kilroy-usage-gate.conf`. `MODE` pointer values: `logical` (the burn-envelope plan) | `stopnext` (park at next safe boundary) | `burnout` (ignore all limits).
-- The usage probe uses the OAuth token from cli-proxy-api's auth file (read-only usage GET). The token is NEVER printed/echoed; re-read it each tick so proxy-managed refresh is honored.
-- The gate acts ONLY at top-level `node.completed` boundaries; an in-flight stage always finishes (kilroy has stages that cannot be stopped mid-flight). 85% is a fresh-run admission cap, not a mid-stage kill.
-- Burnout is opt-in only (`BURNOUT_ARMED=1` or `MODE=burnout`) — it never self-enables. Auto-arm near the weekly reset requires `BURNOUT_ARMED=1`.
-- Do NOT restart cli-proxy-api — it is actively serving and the run is parked/resumable.
-- Default anchors ship at 50%@1h, 80%@5h, 85% fresh-run cap, 2× weekly daily-pace, 90% weekly ceiling, 120s poll, 5h burnout window. The gate logs per-stage util-burn so these can be recalibrated from real data.
-- User-accepted: the cli-proxy-api + subscription-OAuth setup carries account-suspension risk under Anthropic policy; accepted for this account. This planning scope treats that risk as accepted (do not re-prompt).
-- Reference: `/api/oauth/usage` returns `five_hour.{utilization,resets_at}`, `seven_day.{utilization,resets_at}`, `seven_day_sonnet`, and a `limits[]` array (kind/group/percent/severity/resets_at/is_active) — utilization is 0–100.
+- The disk-stacking investigation is GENUINELY OPEN — the user suspects a false positive. Prove or disprove from on-disk evidence (pass counts + sizes) BEFORE concluding; do not assume the earlier "incomplete fix" claim. Capture the forensics in step 1 BEFORE the reclaim in step 3 destroys the evidence.
+- Disk reclaim of `run-20260618T063934Z` is user-authorized (failed at the 429 wall, no compiled artifact). Keep cheap metadata; only the bulky `parallel/` + `run.tgz*` go.
+- Kilroy bugs MUST be fixed in `~/workspace/x85446/kilroy/` (Prime Directive); redeploy via `darkfactorySetup.sh` (rsync source + rebuild + version-stamp). Never paper over in the izcrOS spec/worktree.
+- kilroyHelp is UNVERSIONED at `/Users/travis/workspace/x85446/creds/kilroyHelp` — edit in place, deploy via `scp` to `/opt/darkfactory/scripts/kilroyHelp`; never commit it to the repo. (Already built + deployed this session — see Decisions log.)
+- The gate config `/etc/kilroy-usage-gate.conf` is the single source of truth, re-read each stage with NO restart. `MODE` = logical | stopnext | burnout. OAuth token NEVER printed. Gate acts only at `node.completed`; in-flight stages finish.
+- During the live run, watch disk: the gate guards quota, not disk. If `/` climbs toward full during validation, `launch stopsafe` and treat the disk growth as evidence feeding step 1's verdict (the very bug under investigation).
+- Do NOT restart cli-proxy-api. ToS/account-suspension risk of the cli-proxy-api + subscription-OAuth setup is user-accepted (do not re-prompt).
+- Reference: `/api/oauth/usage` → `five_hour.{utilization,resets_at}`, `seven_day.{utilization,resets_at}`, `seven_day_sonnet`, `limits[]` (kind/group/percent/severity/resets_at/is_active); utilization 0–100.
 
 ## Decisions log
-(empty until execution)
+2026-06-23T21:15:00Z — Steps for the usage gate (now DONE) implemented in creds/kilroyHelp: `_probe_usage`+`cmd_usage`, gate config (`/etc/kilroy-usage-gate.conf`, KEY=value, re-read each call, no-source parse), `_threshold_5h`/`_threshold_7d`/`_window_elapsed`, `_gate_decide`, `cmd_gate` (run/--check/--selftest/--show-config/--status), launch wiring (fresh-run cap + `_gate_start_daemon`), registered usage+gate in ACTIONS + dispatch. Float math via awk (`_fgt`/`_fge`). Burnout = MODE=burnout OR (BURNOUT_ARMED=1 and weekly reset ≤ WINDOW_H h). Deployed to /opt/darkfactory/scripts/kilroyHelp.
+2026-06-23T21:19:00Z — Gate validated green EXCEPT live active-run paths: usage HTTP 200 (Mac 3% vs darkfactory 4%); selftest tables exact; 8 injected `--check` cases correct + real `gate --check` ALLOW; loop logged a real `eval@completion#12` (ALLOW) + `PARK -> launch stopsafe` on inject; fresh-run cap refuses at 99%; burnout cases correct; config auto-create + on-disk MODE edit no-restart; docs/resume.md "Usage gate" section written. Remaining (this plan): live stopsafe-on-active + auto-resume + gate-started-by-launch + per-stage burn — all need an ACTIVE run, hence the disk work.
+2026-06-23T21:30:00Z — Re-planned per user: add a thorough, OPEN disk-stacking investigation (user suspects false positive; earlier "fix incomplete" claim is NOT assumed) ahead of the reclaim, fix only if proven real, then finish the live E2E. Earlier raw observation to re-examine, not trust: `parallel/` = 224G total; whether that is many retained passes or ≤keep legitimately-large passes is exactly what step 1 must determine.
 
 ## Status / Log
-(empty until execution)
+2026-06-23T21:30:00Z — Plan re-opened to phase: planned with the disk-investigation + live-E2E steps. Awaiting `/iterate`.

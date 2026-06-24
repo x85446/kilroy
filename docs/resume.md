@@ -167,6 +167,45 @@ incus snapshot list IncusOS:kilroyfactor
 
 ---
 
+## Usage gate (`kilroyHelp gate`)
+
+`kilroyHelp launch run/resume` start a usage gate that keeps a run inside an
+account-usage budget. It reads Anthropic's real 5h/7d windows from
+`GET https://api.anthropic.com/api/oauth/usage` (auth: the OAuth token
+cli-proxy-api already stores in `~/.cli-proxy-api/claude-*.json` + header
+`anthropic-beta: oauth-2025-04-20`) — headless, no Mac session needed. At each
+safe stage boundary (top-level `node.completed`) it evaluates the budget and
+either lets the run continue or `launch stopsafe`s it; while parked it
+re-checks every `POLL_INTERVAL_S` and `launch resume`s once the windows clear.
+In-flight stages always finish — the gate never kills mid-stage.
+
+Subcommands: `kilroyHelp usage` (print 5h/7d utilization), `gate --check`
+(one verdict), `gate --selftest` (assert threshold tables), `gate --show-config`,
+`gate --status`, `gate run` (the loop; started automatically by launch).
+
+All thresholds live in `/etc/kilroy-usage-gate.conf`, re-read on every
+evaluation — edit it on disk and the next stage obeys, no restart:
+
+- `MODE` = `logical` (envelope + weekly pace) | `stopnext` (park at next
+  boundary) | `burnout` (ignore all limits).
+- 5h envelope: `T(h) = clamp(T5H_ANCHOR_H1 + (H5−H1)/4·(h−1), H1, H5)`,
+  default 50%@1h → 80%@5h.
+- Weekly guard: park if `util_7d > WEEKLY_PACE_MULT·(days/7)·100` (default 2×,
+  the statusline "red" line), capped at `WEEKLY_CEILING` (90%).
+- `FRESH_RUN_CAP` (85%): refuse to *start* a fresh `launch run` at/above this
+  (resume is exempt; `MODE=burnout` overrides).
+- Burnout: `BURNOUT_ARMED=1` bypasses all limits when the weekly reset is within
+  `BURNOUT_WINDOW_H` hours (set 10 for the last two 5h blocks); never self-arms.
+
+The gate logs every evaluation (and per-stage utilization burn) to
+`/var/log/kilroy-usage-gate.log`, falling back to `~/kilroy-usage-gate.log`.
+
+Caveat: using a subscription OAuth token through cli-proxy-api violates
+Anthropic's consumer ToS and is detectable (datacenter IP, missing Claude Code
+telemetry, sustained volume) — account-suspension risk, accepted for this box.
+
+---
+
 ## Conversation context the next AI should know
 
 - User: travis (travis.mccollum@gmail.com). Working from Mac at `cypressMini` (the directory `~/workspace/x85446/kilroy/` on Mac is the kilroy fork; `~/workspace/x85446/creds/` is a separate working dir where the live Claude Code session is rooted).
