@@ -205,3 +205,40 @@ func TestPruneOldParallelPasses_MissingParallelRootNoOp(t *testing.T) {
 		t.Errorf("expected no events on missing dir, got %v", *events)
 	}
 }
+
+// TestPruneAllParallelPassesAtStartup: the startup sweep prunes stale passes
+// across ALL fan-out nodes (not just one). This is the fix for resume-leftover
+// passes on completed fan-out nodes that never re-dispatch (the analyze_fanout /
+// plan_fanout 2-passes-retained residual found in run-20260618T063934Z).
+func TestPruneAllParallelPassesAtStartup(t *testing.T) {
+	tmp := t.TempDir()
+	seedPasses(t, tmp, "implement_fanout", []int{1, 2, 3}) // high-churn
+	seedPasses(t, tmp, "analyze_fanout", []int{1, 2})      // completed, resume-leftover
+	seedPasses(t, tmp, "dod_fanout", []int{1})             // single pass
+	eng, _, _ := recordingEngine(t, 0)                     // default keep=1
+
+	eng.pruneAllParallelPassesAtStartup(tmp)
+
+	if got := listPasses(t, tmp, "implement_fanout"); len(got) != 1 || got[0] != "pass3" {
+		t.Errorf("implement_fanout: want [pass3], got %v", got)
+	}
+	if got := listPasses(t, tmp, "analyze_fanout"); len(got) != 1 || got[0] != "pass2" {
+		t.Errorf("analyze_fanout: want [pass2], got %v", got)
+	}
+	if got := listPasses(t, tmp, "dod_fanout"); len(got) != 1 || got[0] != "pass1" {
+		t.Errorf("dod_fanout: want [pass1], got %v", got)
+	}
+}
+
+// TestPruneAllParallelPassesAtStartup_Disabled: keep=-1 leaves everything.
+func TestPruneAllParallelPassesAtStartup_Disabled(t *testing.T) {
+	tmp := t.TempDir()
+	seedPasses(t, tmp, "analyze_fanout", []int{1, 2})
+	eng, _, _ := recordingEngine(t, -1)
+
+	eng.pruneAllParallelPassesAtStartup(tmp)
+
+	if got := listPasses(t, tmp, "analyze_fanout"); len(got) != 2 {
+		t.Errorf("keep=-1 should retain all passes, got %v", got)
+	}
+}

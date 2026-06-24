@@ -148,6 +148,61 @@ func (e *Engine) pruneOldParallelPasses(logsRoot, parallelNodeID string, current
 	}
 }
 
+// pruneAllParallelPassesAtStartup sweeps every parallel/<nodeID> dir and prunes
+// stale passes (keeping the most-recent `keep`). It complements the per-dispatch
+// prune (pruneOldParallelPasses, which only fires when a node fans out again):
+// a resume can rewind and re-create passes that were already pruned on a prior
+// run segment, and for fan-out nodes that have completed and never re-dispatch
+// (e.g. analyze_fanout, plan_fanout) that leftover old pass would otherwise
+// linger on disk forever. Run once at run/resume startup. Honors
+// KeepParallelPasses (-1 disables). Safe: only ever removes non-newest passes,
+// whose results are already merged.
+func (e *Engine) pruneAllParallelPassesAtStartup(logsRoot string) {
+	if e == nil || strings.TrimSpace(logsRoot) == "" {
+		return
+	}
+	if e.Options.KeepParallelPasses == -1 {
+		return // explicitly disabled
+	}
+	parallelRoot := filepath.Join(logsRoot, "parallel")
+	nodeDirs, err := os.ReadDir(parallelRoot)
+	if err != nil {
+		return // no parallel/ yet (fresh run) → nothing to sweep
+	}
+	for _, nd := range nodeDirs {
+		if !nd.IsDir() {
+			continue
+		}
+		nodeID := nd.Name()
+		maxPass := highestParallelPass(filepath.Join(parallelRoot, nodeID))
+		if maxPass <= 0 {
+			continue
+		}
+		// Using the highest on-disk pass as currentPass makes the per-node prune
+		// keep exactly the newest `keep` passes for that node.
+		e.pruneOldParallelPasses(logsRoot, nodeID, maxPass)
+	}
+}
+
+// highestParallelPass returns the largest N among pass<N> dirs under nodeRoot, or 0.
+func highestParallelPass(nodeRoot string) int {
+	entries, err := os.ReadDir(nodeRoot)
+	if err != nil {
+		return 0
+	}
+	maxN := 0
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "pass") {
+			continue
+		}
+		var n int
+		if _, perr := fmt.Sscanf(strings.TrimPrefix(entry.Name(), "pass"), "%d", &n); perr == nil && n > maxN {
+			maxN = n
+		}
+	}
+	return maxN
+}
+
 func classifyJoinMergeMode(g *model.Graph, joinID string) string {
 	if g == nil {
 		return parallelMergeModeManualBox

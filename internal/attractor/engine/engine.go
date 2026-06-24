@@ -629,6 +629,13 @@ func (e *Engine) run(ctx context.Context) (res *Result, err error) {
 
 	// Capture the original logs root for loop_restart (attractor-spec §3.2 Step 7).
 	e.baseLogsRoot = e.LogsRoot
+
+	// Startup sweep: prune stale parallel passes across ALL fan-out nodes (not
+	// just the one about to dispatch). A resume can re-create passes that were
+	// already pruned on a prior segment; completed fan-out nodes never
+	// re-dispatch, so without this their leftover old passes would accumulate
+	// on disk. Keeps the most-recent KeepParallelPasses per node (-1 disables).
+	e.pruneAllParallelPassesAtStartup(e.LogsRoot)
 	e.setLastProgressTime(time.Now().UTC())
 	if e.Options.StallTimeout > 0 {
 		checkEvery := e.Options.StallCheckInterval
