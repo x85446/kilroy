@@ -294,6 +294,12 @@ func resumeFromLogsRoot(ctx context.Context, logsRoot string, ov ResumeOverrides
 	}
 	eng.Context.ReplaceSnapshot(cp.ContextValues, cp.Logs)
 	eng.baseLogsRoot, eng.restartCount = restoreRestartState(logsRoot, cp)
+
+	// Resume enters via runLoop directly, bypassing run() where the fresh-run
+	// startup sweep lives — so prune stale parallel passes here too. This is
+	// exactly where re-materialized / prior-segment passes accumulate on
+	// completed fan-out nodes that never re-dispatch. Honors KeepParallelPasses.
+	eng.pruneAllParallelPassesAtStartup(logsRoot)
 	eng.restartFailureSignatures = restoreRestartFailureSignatures(cp)
 	eng.loopFailureSignatures = restoreLoopFailureSignatures(cp)
 	eng.baseSHA = cp.GitCommitSHA
