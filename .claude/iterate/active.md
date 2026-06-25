@@ -3,7 +3,7 @@
 Started: 2026-06-25T18:15:34Z (planned)
 CWD: /Users/travis/workspace/x85446/kilroy
 phase: executing
-running: 2026-06-25T19:42:00Z
+running: 2026-06-25T19:55:00Z
 
 ## Goal
 Make kilroy drive both Claude (opus-4.8) and OpenAI (gpt-5.5) through cliproxyapi
@@ -120,8 +120,8 @@ both providers.
 
 ## Progress
 - [x] 1. architecture doc
-- [ ] 2. cross-provider round-robin pool (Mission 1A core)
-- [ ] 3. codex/openai gate signal
+- [x] 2. cross-provider round-robin pool (Mission 1A core)
+- [x] 3. codex/openai gate signal
 - [ ] 4. per-provider gate control + single config (Mission 3)
 - [ ] 5. point kilroy at pool + record opus-4.8/gpt-5.5 (Missions 1A+2)
 - [ ] 6. status shows both gate states
@@ -136,3 +136,28 @@ both providers.
 - 2026-06-25T18:17Z step1 DONE. Validation 1b green: live `kilroy-run.service`
   env shows only ANTHROPIC_BASE_URL=http://127.0.0.1:8317 (no OPENAI_BASE_URL);
   doc names both adapter.go files + the round-robin routing fact. Next: step 2.
+- 2026-06-25T19:30Z step2: probed protocol×upstream matrix on 8317 — all 4
+  combos (anthropic/openai × claude/gpt) return 200, proxy translation is
+  bidirectional. Tried oauth-model-alias overlap (alias both to "auto") on a
+  throwaway 8319 instance: FAILED — ambiguous resolution (auto→claude-fable-5,
+  →codex-auto-review, →literal auto). Pivoted to the documented mechanism: a
+  self-referential `openai-compatibility` provider "dualpool" (base-url
+  127.0.0.1:8317/v1, api-key dummy-key) with repeated alias auto→{claude-opus-4-8,
+  gpt-5.5}. On 8319 test: clean 6/6 round-robin on BOTH protocols.
+- 2026-06-25T19:41Z step2 DONE. Applied dualpool to live /etc/cliproxyapi.conf
+  (backup .bak-20260625T194129Z); proxy file-watcher HOT-RELOADED (no restart,
+  honoring the don't-restart constraint) — now "1 OpenAI-compat". Validation 2b
+  GREEN on live 8317 /v1/messages: 10/10 HTTP 200, alternating
+  claude-opus-4-8/gpt-5.5, 6/6 split. Test instance 8319 torn down. The auto
+  alias is the single endpoint kilroy will target in step 5.
+- 2026-06-25T19:54Z step3 DONE. Discovered the codex usage endpoint:
+  https://chatgpt.com/backend-api/codex/usage returns rate_limit.primary_window
+  (5h, window_s=18000) + secondary_window (7d, window_s=604800) as used_percent
+  (0-100) + reset_after_seconds — a clean mirror of Anthropic's 5h/7d. Added
+  KILROYHELP_CODEX_USAGE_URL/_AUTH_GLOB env defaults, _probe_usage_codex (CX_*
+  vars, GATE_TEST_CX_* injection, token never printed, needs chatgpt-account-id
+  +originator+user-agent headers), _usage_print_block helper, and extended
+  cmd_usage with --provider claude|codex|both. Deployed (md5 0c118fc7). Validation
+  3b GREEN: `usage --provider codex` exit 0, shows 5h/7d, no token leak. NOTE:
+  live claude 7d=92% (>90% ceiling → why run is parked), codex 0% — the exact
+  failover case step 4 handles. Same burn-envelope thresholds apply to both.
