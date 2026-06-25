@@ -3,7 +3,7 @@
 Started: 2026-06-25T18:15:34Z (planned)
 CWD: /Users/travis/workspace/x85446/kilroy
 phase: executing
-running: 2026-06-25T19:55:00Z
+running: 2026-06-25T20:02:00Z
 
 ## Goal
 Make kilroy drive both Claude (opus-4.8) and OpenAI (gpt-5.5) through cliproxyapi
@@ -122,8 +122,10 @@ both providers.
 - [x] 1. architecture doc
 - [x] 2. cross-provider round-robin pool (Mission 1A core)
 - [x] 3. codex/openai gate signal
-- [ ] 4. per-provider gate control + single config (Mission 3)
-- [ ] 5. point kilroy at pool + record opus-4.8/gpt-5.5 (Missions 1A+2)
+- [x] 4. per-provider gate control + single config (Mission 3) — mechanism proven
+       via gate --tick; live-daemon systemd stopsafe/resume cycle folds into step 5
+- [ ] 5. point kilroy at pool + record opus-4.8/gpt-5.5 (Missions 1A+2) + bring up
+       new gate daemon + exercise live stopsafe/resume
 - [ ] 6. status shows both gate states
 
 ## Decisions log
@@ -161,3 +163,27 @@ both providers.
   3b GREEN: `usage --provider codex` exit 0, shows 5h/7d, no token leak. NOTE:
   live claude 7d=92% (>90% ceiling → why run is parked), codex 0% — the exact
   failover case step 4 handles. Same burn-envelope thresholds apply to both.
+- 2026-06-25T19:45Z step4: verified the failover lever — flipping `.disabled` on
+  an auth file hot-reloads in cliproxyapi and drops/restores that provider from
+  the dualpool (tested reversibly on codex auth: disable→8/8 claude, restore→4/4).
+- 2026-06-25T20:00Z step4 mechanism DONE. Refactored _gate_decide→_gate_decide_for
+  (explicit inputs, per-provider); added _gate_set_auth_disabled (atomic .disabled
+  flip), _gate_eval_provider, _gate_eval_all, _gate_tick_once. Rewrote
+  _gate_run_loop: each tick evaluates ALL providers (GATE_PROVIDERS), enforces
+  per-provider failover, pauses the run (launch stopsafe) only when n_allowed=0,
+  resumes when any frees; smart-wake = soonest gated 5h reset. Added PROVIDERS to
+  config defaults+loader (GATE_PROVIDERS_OVERRIDE env). New `gate --check`
+  (per-provider+RUN verdict) and `gate --tick` (one enforce pass, no systemd).
+  Deployed md5 4c272706. Stopped OLD gate daemon (pid 635577); added
+  PROVIDERS=claude codex to /etc/kilroy-usage-gate.conf. Validation 4b GREEN via
+  tick+injection: (a) claude-gated→claude.disabled=true,codex serves,auto=6/6
+  gpt-5.5; (b) both-gated→both disabled,RUN would PARK; (c) claude-freed→restored,
+  auto=6/6 opus; cleanup→both enabled. INTERIM STATE: gate daemon stopped, run
+  stopped (inactive), both auths enabled, live claude wk=92%. Live daemon bring-up
+  + real systemd stopsafe/resume cycle happen in step 5.
+- NOTE for step5: with 1A pool, kilroy requests model "auto" (not the two real
+  names), so manifest.json force_models will show anthropic=auto; the two real
+  models (claude-opus-4-8/gpt-5.5) are pinned in the cliproxyapi dualpool config
+  (Mission 2 satisfied there). 5b proof = run.log completions served by BOTH
+  upstreams via proxy logs, not manifest naming the two models. Switching to
+  "auto" also upgrades the run to opus-4.8 automatically.
