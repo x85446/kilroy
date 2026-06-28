@@ -3,20 +3,28 @@
 How kilroy reaches LLM providers, how cliproxyapi fronts them, and how the
 usage-gate controls the flow.
 
-## The path today
+## The path
 
-One path, Anthropic-only. `kilroy-run.service` on darkfactory exports a single
-relevant variable:
+kilroy reaches both Claude and OpenAI through a single cliproxyapi endpoint that
+round-robins between them. `kilroy-run.service` exports:
 
 ```
 ANTHROPIC_BASE_URL=http://127.0.0.1:8317
 ```
 
 kilroy's Anthropic adapter sends `anthropic_messages` requests to cliproxyapi on
-`:8317`, which forwards them upstream using the stored `claude-*.json` OAuth
-credential. No `OPENAI_BASE_URL` is set and no graph node selects an OpenAI
-model, so the `codex-*.json` credential that also lives in the proxy is never
-exercised by a run.
+`:8317`. A fresh run (`kilroyHelp run`) forces every node to the model alias
+`auto` (`--force-model anthropic=auto`); cliproxyapi resolves `auto` through a
+self-referential `openai-compatibility` pool that round-robins `claude-opus-4-8`
+(served by `claude-*.json`) and `gpt-5.5` (served by `codex-*.json`), translating
+protocols so the Anthropic-protocol client transparently gets either upstream.
+
+The usage-gate keeps each provider inside its budget independently: a provider
+over budget is dropped from the pool (its auth `disabled`), so the pool fails
+over to the other; the run pauses only when **both** are gated.
+
+A resumed run keeps the models baked into its original graph (`resume` does not
+accept `--force-model`), so to put an existing run on the pool, start it fresh.
 
 ## kilroy side — provider-aware by design
 
@@ -58,9 +66,30 @@ Anthropic-compatible surface and routes each request by **model name**:
 - Per-credential `disabled` plus cooldown/`quota-exceeded` switching let the
   proxy drop a credential from rotation and fail over to another.
 
-Pooling a Claude model and a GPT model under a single client-facing alias (so one
-endpoint round-robins across both AIs — Mission 1A) relies on the alias-pool plus
-translation layer; it is configured in cliproxyapi, not in kilroy.
+### The dual-AI pool
+
+`/etc/cliproxyapi.conf` defines an `openai-compatibility` provider that points
+back at the proxy itself and pools the two upstream models under one alias:
+
+```yaml
+openai-compatibility:
+  - name: dualpool
+    base-url: http://127.0.0.1:8317/v1
+    api-key-entries:
+      - api-key: dummy-key
+    models:
+      - name: claude-opus-4-8
+        alias: auto
+      - name: gpt-5.5
+        alias: auto
+```
+
+A repeated alias builds a round-robin pool with failover: a request for `auto`
+alternates between `claude-opus-4-8` and `gpt-5.5`; if the chosen upstream is
+unavailable (its OAuth auth is `disabled`), the request continues on the other.
+The inner calls use concrete model names, so there is no routing loop. (Overlap­
+ping the same alias across raw OAuth channels via `oauth-model-alias` does NOT
+work — it resolves ambiguously; the `openai-compatibility` pool is the mechanism.)
 
 ## Auth files
 
@@ -79,7 +108,19 @@ status` reports one `auth <type>` line per credential with its freshness.
 
 ## Usage-gate
 
-`kilroyHelp gate run` watches account usage at each safe stage boundary
-(`node.completed`) and parks/​resumes the run to stay inside a budget. The gate,
-the proxy credentials, and kilroy's model selection are the three levers that
-together decide which AI does the next unit of work and when the run pauses.
+`kilroyHelp gate run` controls both providers from one config,
+`/etc/kilroy-usage-gate.conf` (`PROVIDERS=claude codex`, re-read every tick). Each
+provider has the same 5h/7d burn envelope, evaluated against its own usage:
+
+- **Claude** — Anthropic `/api/oauth/usage` (`five_hour`/`seven_day` utilization).
+- **Codex** — ChatGPT `backend-api/codex/usage` (`primary_window` = 5h,
+  `secondary_window` = 7d, `used_percent`). Same shape, same thresholds.
+
+Each tick the gate probes both, and enforces by **failover**: a gated provider's
+auth is `disabled` (dropped from the pool); an under-budget provider is restored.
+The run is paused (`launch stopsafe`) only when **every** provider is gated, and
+resumed (`launch resume`) the moment one frees. `kilroyHelp usage --provider
+claude|codex|both` shows live utilization; `kilroyHelp gate --check` shows the
+per-provider verdict; `kilroyHelp gate --tick` runs one enforcement pass.
+`kilroyHelp status` shows each provider's gate state and which upstream the pool
+is currently serving.
