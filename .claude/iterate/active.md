@@ -3,7 +3,7 @@
 Started: 2026-06-26T04:26Z (planned)
 CWD: /Users/travis/workspace/x85446/kilroy
 phase: executing
-running: 2026-06-28T00:00:05Z
+running: 2026-06-28T00:30:00Z
 
 ## Goal
 Make routing a config-driven degradation ladder — role-split when both engines
@@ -138,8 +138,53 @@ role-split; both gated → pause). Single values (`round-robin`, `fill-first`,
   (leave no provider stranded `disabled` and no test graph mis-pipecleaned).
 - Burnout stays opt-in (`BURNOUT_ARMED=1`/`MODE=burnout`); never self-arms.
 
+## Progress
+- [x] 1. config knob (STRATEGY ladder + PRIMARY + role map)
+- [x] 2. pipeclean modes (role-split assignment + to-engine)
+- [ ] 3. round-robin mode (pool + auth failover)
+- [ ] 4. fill-first mode (all→PRIMARY then survivor)
+- [ ] 5. role-split + ladder engine (pipeclean-driven failover/return)
+- [ ] 6. claude -p gated-skip + robust locate
+- [ ] 7. docs
+
+## Design notes (resolved during execution)
+- Two routing families: POOL-based (round-robin → kilroy model=auto + gate
+  auth-disable failover) and GRAPH-based (role-split + fill-first → kilroy direct
+  per-node providers; gate re-pipecleans graph + stopsafe→resume on transitions).
+- Ladder default `role-split fill-first` is GRAPH-based: role-split when both
+  healthy, to-survivor pipeclean (fill-first) when one gated, pipeclean-return on
+  recovery, pause when both. round-robin is a standalone POOL-based mode.
+- Engine→kilroy mapping: claude→(anthropic, claude-opus-4-8); codex→(openai, gpt-5.5).
+- role-split run needs BOTH ANTHROPIC_BASE_URL + OPENAI_BASE_URL → proxy; pool
+  modes need only ANTHROPIC_BASE_URL + --force-model anthropic=auto.
+
 ## Decisions log
-(empty until execution)
+- 2026-06-28T00:00Z entry: transitioned plan→executing, /loop armed (a1365b74).
 
 ## Status / Log
-(empty until execution)
+- 2026-06-28T00:00Z starting step 1 (config knob).
+- 2026-06-28T00:10Z step1 DONE. Added STRATEGY (default "role-split fill-first"),
+  PRIMARY, ROLE_STRONG/DEFAULT_PROVIDER to config defaults + loader + show-config +
+  _engine_to_provider_model (claude→anthropic/claude-opus-4-8, codex→openai/
+  gpt-5.5). Live config updated. Val1 GREEN (show-config + override no-restart).
+- 2026-06-28T00:25Z step2 DONE. Real graphs use CSS model_stylesheet rules
+  (`.hard { llm_model: opus; llm_provider: anthropic; }`), NOT DOT attrs — class =
+  role, current model (opus/sonnet) = strong/default. Extended cmd_pipeclean with
+  --mode role-split (strong→STRONG_ENGINE, default→DEFAULT_ENGINE) and to-engine
+  (all→TARGET_ENGINE); back-compat default anthropic-tiers. Fixed
+  _engine_to_provider_model to emit trailing newline (read-under-set-e bug). Val2
+  GREEN: role-split → .hard=anthropic/opus-4-8, *=openai/gpt-5.5; to-engine→both gpt-5.5.
+
+## DESIGN RESOLUTION for steps 3-5 (the unifying model)
+- A run is ONE family, chosen by whether STRATEGY contains role-split:
+  - **graph family** (STRATEGY has role-split): kilroy uses DIRECT per-node
+    providers (both ANTHROPIC_BASE_URL + OPENAI_BASE_URL, no --force-model). The
+    gate's lever is PIPECLEAN: role-split when both healthy, to-engine(survivor)
+    when one gated; auths STAY ENABLED (so claude -p still works, recovery easy).
+    Mode change → stopsafe→pipeclean→resume.
+  - **pool family** (no role-split: round-robin and/or fill-first): kilroy uses
+    model=auto (pool). The gate's lever is AUTH-DISABLE. round-robin=both healthy
+    in pool; fill-first=keep PRIMARY-only in pool until gated then swap.
+- Both families pause the run only when ALL providers gated; resume/climb on recovery.
+- Refactor needed: split _gate_eval_provider into DECIDE-only (verdict, no
+  enforce) + a strategy-aware ENFORCE dispatcher keyed on family+active-rung.
