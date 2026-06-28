@@ -3,7 +3,7 @@
 Started: 2026-06-26T04:26Z (planned)
 CWD: /Users/travis/workspace/x85446/kilroy
 phase: executing
-running: 2026-06-28T00:30:00Z
+running: 2026-06-28T01:05:00Z
 
 ## Goal
 Make routing a config-driven degradation ladder — role-split when both engines
@@ -141,10 +141,10 @@ role-split; both gated → pause). Single values (`round-robin`, `fill-first`,
 ## Progress
 - [x] 1. config knob (STRATEGY ladder + PRIMARY + role map)
 - [x] 2. pipeclean modes (role-split assignment + to-engine)
-- [ ] 3. round-robin mode (pool + auth failover)
-- [ ] 4. fill-first mode (all→PRIMARY then survivor)
-- [ ] 5. role-split + ladder engine (pipeclean-driven failover/return)
-- [ ] 6. claude -p gated-skip + robust locate
+- [x] 3. round-robin mode (pool + auth failover)
+- [x] 4. fill-first mode (all→PRIMARY then survivor)
+- [ ] 5. role-split + ladder engine (pipeclean-driven failover/return) + cmd_run wiring
+- [x] 6. claude -p gated-skip + robust locate
 - [ ] 7. docs
 
 ## Design notes (resolved during execution)
@@ -188,3 +188,18 @@ role-split; both gated → pause). Single values (`round-robin`, `fill-first`,
 - Both families pause the run only when ALL providers gated; resume/climb on recovery.
 - Refactor needed: split _gate_eval_provider into DECIDE-only (verdict, no
   enforce) + a strategy-aware ENFORCE dispatcher keyed on family+active-rung.
+
+## Status (steps 3-4)
+- 2026-06-28T01:00Z steps 3&4 DONE. Refactored eval to DECIDE-only; added
+  _gate_strategy_family/_gate_active_mode/_gate_survivor_engine/_gate_enforce_pool/
+  _gate_enforce_graph/_gate_run_graph_path. Rewrote loop to dispatch by family.
+  Val3 round-robin & Val4 fill-first GREEN (8/8 survivor after reload settle;
+  both-gated→PARK; auths restored). 1-stray on transition = hot-reload lag, not a bug.
+- 2026-06-28T01:20Z step6 DONE. Added _locate_claude (login-shell PATH + common
+  dirs — claude IS at ~/.local/bin/claude; `which` over non-interactive ssh missed
+  it) and _claude_is_gated (.disabled flag). _probe_claude_p now skips with
+  "skipped (claude gated)" (dim, no hint) when gated, else runs via the located
+  binary through the proxy. Removed two `command -v claude` guards (cliproxy
+  check + login verify) that blocked the probe. Val6 GREEN: gated→skipped,
+  un-gated→pass (3s reply).
+- Next: step 5 (cmd_run strategy wiring + role-split routing proof), step 7 (docs).
