@@ -3,7 +3,7 @@
 Started: 2026-06-26T04:26Z (planned)
 CWD: /Users/travis/workspace/x85446/kilroy
 phase: executing
-running: 2026-06-28T01:05:00Z
+running: 2026-06-28T21:10:00Z
 
 ## Goal
 Make routing a config-driven degradation ladder — role-split when both engines
@@ -143,9 +143,9 @@ role-split; both gated → pause). Single values (`round-robin`, `fill-first`,
 - [x] 2. pipeclean modes (role-split assignment + to-engine)
 - [x] 3. round-robin mode (pool + auth failover)
 - [x] 4. fill-first mode (all→PRIMARY then survivor)
-- [ ] 5. role-split + ladder engine (pipeclean-driven failover/return) + cmd_run wiring
+- [x] 5. role-split + ladder engine (pipeclean-driven failover/return) + cmd_run wiring
 - [x] 6. claude -p gated-skip + robust locate
-- [ ] 7. docs
+- [ ] 7. docs + restart gate daemon
 
 ## Design notes (resolved during execution)
 - Two routing families: POOL-based (round-robin → kilroy model=auto + gate
@@ -195,11 +195,54 @@ role-split; both gated → pause). Single values (`round-robin`, `fill-first`,
   _gate_enforce_graph/_gate_run_graph_path. Rewrote loop to dispatch by family.
   Val3 round-robin & Val4 fill-first GREEN (8/8 survivor after reload settle;
   both-gated→PARK; auths restored). 1-stray on transition = hot-reload lag, not a bug.
-- 2026-06-28T01:20Z step6 DONE. Added _locate_claude (login-shell PATH + common
-  dirs — claude IS at ~/.local/bin/claude; `which` over non-interactive ssh missed
-  it) and _claude_is_gated (.disabled flag). _probe_claude_p now skips with
-  "skipped (claude gated)" (dim, no hint) when gated, else runs via the located
-  binary through the proxy. Removed two `command -v claude` guards (cliproxy
-  check + login verify) that blocked the probe. Val6 GREEN: gated→skipped,
-  un-gated→pass (3s reply).
-- Next: step 5 (cmd_run strategy wiring + role-split routing proof), step 7 (docs).
+- 2026-06-28T01:20Z step6 DONE. _locate_claude + _claude_is_gated; _probe_claude_p
+  skips when gated (dim) else runs via located binary; removed 2 `command -v claude`
+  guards. Val6 GREEN: gated→skipped, un-gated→pass.
+
+## Status (step 5 — IN PROGRESS, mostly done)
+- DONE in step 5:
+  - cmd_run strategy wiring: graph family → run.yaml gets openai provider +
+    exports OPENAI_BASE_URL/KEY + saves LOGS_ROOT/graph.dot.orig (pristine) +
+    pipecleans graph role-split; pool family → --force-model auto. cmd_resume
+    wires the OpenAI env for graph family. Both providers auto-detect (verified).
+  - CRITICAL FIX: OPENAI_BASE_URL must be the BARE host (http://127.0.0.1:8317),
+    NOT .../v1 — kilroy's openai adapter appends /v1/chat/completions (mirrors the
+    anthropic adapter appending /v1/messages). With /v1 it 404'd ("openai
+    not_found" deterministic-cycle abort). Fixed in cmd_run + cmd_resume (both
+    occurrences) + the test. After fix, all-openai run goes exit=1→exit=0.
+  - _gate_enforce_graph rewritten to derive EVERY rewrite from graph.dot.orig
+    (pristine), so role info survives a fill-first flatten. Detects change by
+    md5. role-restoration PROVEN: 5c re-pipeclean → .hard back to anthropic/
+    claude-opus-4-8 (the to-engine flatten had wiped it; .orig restores it).
+  - pipeclean role-split / to-engine: graph assignment proven (.hard→claude opus,
+    *→openai gpt-5.5; to-engine→all gpt-5.5).
+- REMAINING in step 5 (the open bug): the unclassed `*`→openai node (summarize)
+  RAN (node.started/completed) but routed to ANTHROPIC, not openai — runs show
+  only /v1/messages, never /v1/chat/completions, even with fresh (cache-miss)
+  prompts. Hypothesis: kilroy does NOT apply a `* { llm_provider: openai }`
+  model_stylesheet rule's PROVIDER to unclassed nodes (unclassed may default to
+  anthropic). run.log has no provider_selected event in this kilroy build to
+  confirm. NEXT-ATTEMPT options for the iterator: (a) make role-split pipeclean
+  emit a more specific selector or per-NODE llm_provider attrs instead of relying
+  on `*`; (b) confirm via a graph where the default nodes carry explicit
+  class+rule; (c) check kilroy agent_router for how stylesheet provider resolves.
+  The contract (5b) is: a role-split run shows the default node served by the
+  SECONDARY engine (gpt-5.5 / chat/completions) — must observe that endpoint.
+- Also remaining: step 7 (docs), and restart the gate daemon (stopped during
+  testing) + leave both auths enabled. The live graph-family stopsafe/resume
+  cycle reuses the proven cmd_launch + _gate_enforce_graph.
+- Deployed kilroyHelp md5 e293c59a (has the OPENAI_BASE_URL fix).
+- 2026-06-28T21:15Z step5 DONE — the "bug" was MY validation grep. kilroy's openai
+  adapter uses the OpenAI RESPONSES API (POST /v1/responses), NOT
+  /v1/chat/completions. cliproxyapi routes /v1/responses to the codex backend. So
+  role-split WAS working all along. Re-validated with correct endpoints:
+  5a role-split → 1 /v1/messages (claude .hard) + 3 /v1/responses (gpt *);
+  5b survivor=codex → 6 /v1/responses, 0 /v1/messages; 5c return → 6 /v1/messages
+  (claude restored) + 3 /v1/responses. Role-split routing + degradation +
+  pipeclean-return all GREEN. Stylesheet provider resolution confirmed correct in
+  internal/attractor/style/stylesheet.go (universal `*` applies llm_provider to
+  unclassed nodes; only sets missing props). Graph-family gate: codex gated →
+  _gate_survivor_engine=claude → to-engine(claude) pipeclean → all /v1/messages,
+  no /v1/responses; auths stay enabled (claude -p unaffected). Live daemon
+  stopsafe→pipeclean→resume = proven cmd_launch + proven _gate_enforce_graph.
+- Only step 7 (docs) + restart gate daemon remain.
