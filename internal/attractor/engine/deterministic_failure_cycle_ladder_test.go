@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -180,6 +181,30 @@ digraph G {
 	p, m, ok := eng.escalatedRouteFor("n")
 	if !ok || p != "openai" || m != "gpt-5.5" {
 		t.Fatalf("lever #2: expected escalated route openai/gpt-5.5, got %q/%q ok=%v", p, m, ok)
+	}
+
+	// lever #1 must reach the FILE the re-run agent reads, not just the context
+	// key. Seed a dossier file at the context path, re-run the ladder, assert the
+	// file now carries the escalation banner.
+	dossierPath := filepath.Join(logsRoot, failureDossierFileName)
+	if err := writeJSON(dossierPath, failureDossier{Version: 1, FailedNodeID: "n", Summary: "original summary"}); err != nil {
+		t.Fatalf("seed dossier: %v", err)
+	}
+	eng.Context.Set(failureDossierContextLogsPathKey, dossierPath)
+	eng.applyEscalationLadder(node, "n|deterministic|boom", 8, 10)
+	raw, err := os.ReadFile(dossierPath)
+	if err != nil {
+		t.Fatalf("read dossier: %v", err)
+	}
+	var d failureDossier
+	if err := json.Unmarshal(raw, &d); err != nil {
+		t.Fatalf("unmarshal dossier: %v", err)
+	}
+	if !strings.Contains(d.Escalation, "ESCALATION") {
+		t.Fatalf("lever #1: expected escalation field in dossier FILE, got %q", d.Escalation)
+	}
+	if !strings.HasPrefix(d.Summary, "ESCALATION") {
+		t.Fatalf("lever #1: expected banner prepended to dossier FILE summary, got %q", d.Summary)
 	}
 
 	// Idempotent: a second ladder tick must not double-stack the banner.

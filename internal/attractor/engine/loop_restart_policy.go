@@ -265,6 +265,43 @@ func (e *Engine) escalatedRouteFor(nodeID string) (string, string, bool) {
 	return r.Provider, r.Model, true
 }
 
+// injectEscalationIntoDossierFiles writes the escalation banner into the failure
+// dossier file(s) the re-run agent reads (the worktree copy named in
+// context.failure_dossier.path and the logs-root copy). It sets the prominent
+// `escalation` field and prepends the banner to `summary`. Best-effort: missing
+// or unreadable files are skipped. Idempotent within a single dossier version.
+func (e *Engine) injectEscalationIntoDossierFiles(banner string) {
+	if e == nil || e.Context == nil {
+		return
+	}
+	paths := map[string]bool{}
+	if lp := strings.TrimSpace(e.Context.GetString(failureDossierContextLogsPathKey, "")); lp != "" {
+		paths[lp] = true
+	}
+	if rel := strings.TrimSpace(e.Context.GetString(failureDossierContextPathKey, "")); rel != "" {
+		if filepath.IsAbs(rel) {
+			paths[rel] = true
+		} else if wt := strings.TrimSpace(e.WorktreeDir); wt != "" {
+			paths[filepath.Join(wt, filepath.FromSlash(rel))] = true
+		}
+	}
+	for p := range paths {
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var d failureDossier
+		if err := json.Unmarshal(raw, &d); err != nil {
+			continue
+		}
+		d.Escalation = banner
+		if !strings.HasPrefix(d.Summary, "ESCALATION (deterministic failure cycle") {
+			d.Summary = banner + "\n\n" + d.Summary
+		}
+		_ = writeJSON(p, d)
+	}
+}
+
 // applyEscalationLadder fires the domain-agnostic escalation levers for a
 // deterministic failure signature that has recurred into [ladder_start, limit).
 // It never aborts — only count>=limit (handled by the caller) does.
@@ -283,18 +320,23 @@ func (e *Engine) applyEscalationLadder(node *model.Node, sig string, count, limi
 	}
 	levers := make([]string, 0, 2)
 
-	// Lever #1 — evidence injection via the dossier summary the re-run reads.
+	// Lever #1 — evidence injection. The re-run agent is told (by the failure-
+	// dossier preamble) to read the dossier FILE as authoritative evidence, so
+	// the banner must land IN THE FILE, not just the in-memory context key. We
+	// write both: the file (what the agent reads) and the context key (for any
+	// templates that reference it).
+	banner := fmt.Sprintf(
+		"ESCALATION (deterministic failure cycle, attempt %d of %d): this exact failure has now recurred %d times and prior fixes did NOT resolve it. Do not repeat the same change. Diagnose the ROOT cause — inspect the upstream inputs, configuration, dependencies, and build settings that feed this stage, not just the surface error.",
+		count, limit, count,
+	)
 	if e.Context != nil {
-		banner := fmt.Sprintf(
-			"ESCALATION (deterministic failure cycle, attempt %d of %d): this exact failure has now recurred %d times and prior fixes did NOT resolve it. Do not repeat the same change. Diagnose the ROOT cause — inspect the upstream inputs, configuration, dependencies, and build settings that feed this stage, not just the surface error.\n\n",
-			count, limit, count,
-		)
 		prev := e.Context.GetString(failureDossierContextSummaryKey, "")
 		if !strings.HasPrefix(prev, "ESCALATION (deterministic failure cycle") {
-			e.Context.Set(failureDossierContextSummaryKey, banner+prev)
+			e.Context.Set(failureDossierContextSummaryKey, banner+"\n\n"+prev)
 		}
-		levers = append(levers, "evidence")
 	}
+	e.injectEscalationIntoDossierFiles(banner)
+	levers = append(levers, "evidence")
 
 	// Lever #2 — engine escalation: route the stuck node to the alternate engine.
 	altProvider, altModel := "", ""
