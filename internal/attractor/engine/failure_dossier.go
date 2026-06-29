@@ -25,6 +25,7 @@ const (
 	failureDossierContextFailedNodeKey   = "context.failure_dossier.failed_node"
 	failureDossierContextFailureClassKey = "context.failure_dossier.failure_class"
 	failureDossierContextSummaryKey      = "context.failure_dossier.summary"
+	failureDossierContextDiagnosisKey    = "context.failure_dossier.diagnosis"
 )
 
 var (
@@ -57,6 +58,11 @@ type failureDossier struct {
 	// agent-facing directive telling the re-run stage the identical failure keeps
 	// recurring and to attack the root cause rather than repeat prior fixes.
 	Escalation string `json:"escalation,omitempty"`
+	// Diagnosis is set by escalation lever #3: a dedicated root-cause analysis
+	// agent reads the produced artifacts against the failure and writes its
+	// findings here, so the next coding attempt starts from a diagnosis instead
+	// of the raw error tail. Empty unless the ladder's diagnosis lever fired.
+	Diagnosis string `json:"diagnosis,omitempty"`
 }
 
 type failureDossierTool struct {
