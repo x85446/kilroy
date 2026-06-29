@@ -276,6 +276,14 @@ type Engine struct {
 	// resetting would defeat the breaker in impl-succeeds/verify-fails cycles.
 	loopFailureSignatures map[string]int
 
+	// escalatedRoutes maps a node ID to the alternate (provider, model) the
+	// deterministic-failure escalation ladder assigned after a signature
+	// recurred past loop_restart_ladder_start. AgentRouter consults this before
+	// the node's own llm_provider, so a stuck node's next attempt runs on a
+	// different engine. Domain-agnostic: kilroy only swaps the engine; it learns
+	// nothing about the target.
+	escalatedRoutes map[string]escalationRoute
+
 	// loopIterations tracks the current iteration count per loop body entry
 	// node. Used by handleLoopIteration to assign distinct attempt numbers
 	// to each loop iteration so every iteration gets its own DB row and
@@ -867,6 +875,14 @@ func (e *Engine) runLoop(ctx context.Context, current string, completed []string
 					"failure_class":   failureClass,
 					"failure_reason":  out.FailureReason,
 				})
+				// Escalation ladder: before the limit aborts, when a signature
+				// has recurred into [ladder_start, limit) take a DIFFERENT path
+				// instead of retrying verbatim — inject the failure as evidence
+				// and route the stuck node to an alternate engine. Domain-
+				// agnostic; only count>=limit aborts.
+				if ladderStart := loopRestartLadderStart(e.Graph); ladderStart > 0 && count >= ladderStart && count < limit {
+					e.applyEscalationLadder(node, sig, count, limit)
+				}
 				if count >= limit {
 					reason := fmt.Sprintf(
 						"run aborted: deterministic failure cycle detected — signature %q repeated %d times (limit %d); likely a persistent provider or auth error",

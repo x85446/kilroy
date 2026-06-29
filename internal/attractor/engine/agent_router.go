@@ -82,7 +82,20 @@ func (r *AgentRouter) Run(ctx context.Context, exec *Execution, node *model.Node
 		return "", nil, fmt.Errorf("missing llm_model on node %s", node.ID)
 	}
 	selectionSource := "graph_attrs"
+	escalated := false
+	// Escalation ladder (deterministic-failure-cycle): a node whose signature has
+	// recurred past loop_restart_ladder_start gets routed to an alternate engine
+	// for its next attempt. This takes precedence over force_model so the stuck
+	// node genuinely changes engine.
 	if exec != nil && exec.Engine != nil {
+		if altProv, altModel, ok := exec.Engine.escalatedRouteFor(node.ID); ok {
+			WarnEngine(exec, fmt.Sprintf("escalation route applied: node=%s provider=%s->%s model=%s->%s (deterministic-cycle ladder)", node.ID, prov, altProv, modelID, altModel))
+			prov, modelID = altProv, altModel
+			selectionSource = "escalation"
+			escalated = true
+		}
+	}
+	if !escalated && exec != nil && exec.Engine != nil {
 		if forcedModelID, forced := forceModelForProvider(exec.Engine.Options.ForceModels, prov); forced {
 			if !strings.EqualFold(modelID, forcedModelID) {
 				WarnEngine(exec, fmt.Sprintf("force-model override applied: node=%s provider=%s model=%s (was %s)", node.ID, prov, forcedModelID, modelID))
@@ -108,12 +121,13 @@ func (r *AgentRouter) Run(ctx context.Context, exec *Execution, node *model.Node
 
 	if exec != nil && exec.Engine != nil {
 		exec.Engine.appendProgress(map[string]any{
-			"event":    "provider_selected",
-			"node_id":  node.ID,
-			"provider": prov,
-			"model":    modelID,
-			"backend":  string(backend),
-			"source":   selectionSource,
+			"event":     "provider_selected",
+			"node_id":   node.ID,
+			"provider":  prov,
+			"model":     modelID,
+			"backend":   string(backend),
+			"source":    selectionSource,
+			"escalated": escalated,
 		})
 	}
 

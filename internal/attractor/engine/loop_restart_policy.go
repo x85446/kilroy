@@ -206,6 +206,116 @@ func loopRestartSignatureLimit(g *model.Graph) int {
 	return limit
 }
 
+// escalationRoute is the alternate (provider, model) the deterministic-failure
+// escalation ladder assigns to a stuck node so its next attempt runs on a
+// different engine.
+type escalationRoute struct {
+	Provider string
+	Model    string
+}
+
+// loopRestartLadderStart returns the signature count at which the escalation
+// ladder begins (graph attr loop_restart_ladder_start). 0 (the default) keeps
+// the plain breaker behaviour: every recurrence just counts toward the limit
+// with no escalation. When set, recurrences in [ladder_start, limit) fire the
+// domain-agnostic escalation levers before the limit aborts the run.
+func loopRestartLadderStart(g *model.Graph) int {
+	if g == nil {
+		return 0
+	}
+	start := parseInt(g.Attrs["loop_restart_ladder_start"], 0)
+	if start < 0 {
+		return 0
+	}
+	return start
+}
+
+// escalationAltRoute returns the alternate (provider, model) a stuck node is
+// escalated to once the ladder engages, and whether one is configured. It is
+// deliberately domain-agnostic: both values come from graph attrs
+// (escalation_alt_provider / escalation_alt_model) — kilroy hardcodes no engine
+// or model. The engine lever is skipped (ok=false) unless BOTH are set, so a
+// provider can never be flipped without a model it can actually serve.
+func escalationAltRoute(g *model.Graph) (string, string, bool) {
+	if g == nil {
+		return "", "", false
+	}
+	ap := normalizeProviderKey(strings.TrimSpace(g.Attrs["escalation_alt_provider"]))
+	am := strings.TrimSpace(g.Attrs["escalation_alt_model"])
+	if ap == "" || am == "" {
+		return "", "", false
+	}
+	return ap, am, true
+}
+
+// escalatedRouteFor returns the alternate (provider, model) the ladder assigned
+// to a node, if any. AgentRouter calls this before resolving the node's own
+// llm_provider.
+func (e *Engine) escalatedRouteFor(nodeID string) (string, string, bool) {
+	if e == nil || e.escalatedRoutes == nil {
+		return "", "", false
+	}
+	r, ok := e.escalatedRoutes[strings.TrimSpace(nodeID)]
+	if !ok {
+		return "", "", false
+	}
+	return r.Provider, r.Model, true
+}
+
+// applyEscalationLadder fires the domain-agnostic escalation levers for a
+// deterministic failure signature that has recurred into [ladder_start, limit).
+// It never aborts — only count>=limit (handled by the caller) does.
+//
+//   - Lever #1 (evidence): prepend an ESCALATION banner to the failure-dossier
+//     summary that re-run nodes already read, so the model is told the identical
+//     failure recurred and to attack the root cause instead of repeating itself.
+//   - Lever #2 (engine): record an alternate (provider, model) for the stuck
+//     node so its next attempt runs on a different engine (only when an
+//     alternate is configured on the graph).
+//
+// Both levers are best-effort and idempotent across repeats.
+func (e *Engine) applyEscalationLadder(node *model.Node, sig string, count, limit int) {
+	if e == nil || node == nil {
+		return
+	}
+	levers := make([]string, 0, 2)
+
+	// Lever #1 — evidence injection via the dossier summary the re-run reads.
+	if e.Context != nil {
+		banner := fmt.Sprintf(
+			"ESCALATION (deterministic failure cycle, attempt %d of %d): this exact failure has now recurred %d times and prior fixes did NOT resolve it. Do not repeat the same change. Diagnose the ROOT cause — inspect the upstream inputs, configuration, dependencies, and build settings that feed this stage, not just the surface error.\n\n",
+			count, limit, count,
+		)
+		prev := e.Context.GetString(failureDossierContextSummaryKey, "")
+		if !strings.HasPrefix(prev, "ESCALATION (deterministic failure cycle") {
+			e.Context.Set(failureDossierContextSummaryKey, banner+prev)
+		}
+		levers = append(levers, "evidence")
+	}
+
+	// Lever #2 — engine escalation: route the stuck node to the alternate engine.
+	altProvider, altModel := "", ""
+	if ap, am, ok := escalationAltRoute(e.Graph); ok {
+		if e.escalatedRoutes == nil {
+			e.escalatedRoutes = map[string]escalationRoute{}
+		}
+		e.escalatedRoutes[strings.TrimSpace(node.ID)] = escalationRoute{Provider: ap, Model: am}
+		altProvider, altModel = ap, am
+		levers = append(levers, "engine")
+	}
+
+	e.appendProgress(map[string]any{
+		"event":           "deterministic_failure_cycle_ladder",
+		"node_id":         node.ID,
+		"signature":       sig,
+		"signature_count": count,
+		"signature_limit": limit,
+		"levers":          levers,
+		"alt_provider":    altProvider,
+		"alt_model":       altModel,
+	})
+}
+
 func maxNodeVisits(g *model.Graph) int {
 	if g == nil {
 		return defaultMaxNodeVisits

@@ -2,8 +2,8 @@
 
 Started: 2026-06-29T07:01:10Z (planned)
 CWD: /Users/travis/workspace/x85446/kilroy
-phase: planned
-running: false
+phase: executing
+running: 2026-06-29T07:12:00Z
 
 ## Goal
 Make kilroy's deterministic-failure-cycle breaker stop retrying verbatim: keep counts 1–5 unchanged, then from count 6 apply two domain-agnostic escalation levers (inject failure evidence into the node prompt, escalate that node to a different engine), aborting only at count 10 — then build, deploy, run the izcrOS run on it, and monitor that the ladder fires and changes behavior.
@@ -36,7 +36,12 @@ Make kilroy's deterministic-failure-cycle breaker stop retrying verbatim: keep c
 - Context: this builds on levers #1 (inject evidence) and #2 (escalate engine) from the prior discussion; levers #3–#5 (sampling perturbation, backtrack-upstream, diagnose node) are explicitly out of scope for this task.
 
 ## Decisions log
-(empty until execution)
+- 2026-06-29T07:12Z [step1-3] Hook the MAIN-loop deterministic-cycle breaker (engine.go ~852-885), NOT the subgraph one (subgraph.go:158) — the izcrOS run aborts via the main-loop `deterministic_failure_cycle_breaker`. Confirmed via progress.ndjson signatures.
+- 2026-06-29T07:12Z [step1] Config: keep `loop_restart_signature_limit` as the ABORT limit (set 10 for izcrOS); add `loop_restart_ladder_start` (default 0 = disabled → today's behavior). Ladder active when `ladder_start <= count < limit`. izcrOS: start=6, limit=10.
+- 2026-06-29T07:12Z [step2] Lever #1 (evidence) reuses the EXISTING failure dossier: re-run nodes already read `context.failure_dossier.summary`. On ladder, prepend an ESCALATION banner to that key — domain-agnostic, needs no izcrOS prompt change.
+- 2026-06-29T07:12Z [step3] Lever #2 (engine) = per-node provider override map `e.escalatedRoutes[nodeID]={prov,model}`, consulted by AgentRouter.Run BEFORE force_model; emits provider_selected with escalated=true. Alt (provider,model) from graph attrs `escalation_alt_provider`/`escalation_alt_model` (domain-agnostic; izcrOS sets openai/gpt-5.5). If unset → engine lever skipped, evidence still fires.
+- 2026-06-29T07:12Z [tests] Drive val1 via runForTest (main-loop tool_command cycle). val2/val3 via a direct applyEscalationLadder unit test (banner+route) + an AgentRouter.Run stub-runtime test (provider flips). True end-to-end provider flip + prompt evidence validated LIVE on darkfactory (val5/6).
 
 ## Status / Log
-(empty until execution)
+- 2026-06-29T07:02Z entered execution from phase:planned; armed /loop 1m (cron 802c9ace); took lock.
+- 2026-06-29T07:12Z explored engine.go cycle block, loop_restart_policy.go, failure_dossier.go, agent_router.go Run, test seams (runForTest, NewAgentRouterWithRuntimes stub). Starting code implementation for steps 1-3.
