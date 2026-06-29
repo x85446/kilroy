@@ -52,6 +52,11 @@ type failureDossier struct {
 	MissingExecutables []string                 `json:"missing_executables,omitempty"`
 	Tool               *failureDossierTool      `json:"tool,omitempty"`
 	Summary            string                   `json:"summary"`
+	// Escalation is set by the deterministic-failure escalation ladder when this
+	// signature has recurred past loop_restart_ladder_start. It is a prominent,
+	// agent-facing directive telling the re-run stage the identical failure keeps
+	// recurring and to attack the root cause rather than repeat prior fixes.
+	Escalation string `json:"escalation,omitempty"`
 }
 
 type failureDossierTool struct {
