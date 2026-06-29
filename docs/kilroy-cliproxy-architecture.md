@@ -116,11 +116,46 @@ provider has the same 5h/7d burn envelope, evaluated against its own usage:
 - **Codex** — ChatGPT `backend-api/codex/usage` (`primary_window` = 5h,
   `secondary_window` = 7d, `used_percent`). Same shape, same thresholds.
 
-Each tick the gate probes both, and enforces by **failover**: a gated provider's
-auth is `disabled` (dropped from the pool); an under-budget provider is restored.
-The run is paused (`launch stopsafe`) only when **every** provider is gated, and
-resumed (`launch resume`) the moment one frees. `kilroyHelp usage --provider
+Each tick the gate probes both, enforces the active routing strategy (below), and
+pauses the run (`launch stopsafe`) only when **every** provider is gated, resuming
+(`launch resume`) the moment one frees. `kilroyHelp usage --provider
 claude|codex|both` shows live utilization; `kilroyHelp gate --check` shows the
-per-provider verdict; `kilroyHelp gate --tick` runs one enforcement pass.
-`kilroyHelp status` shows each provider's gate state and which upstream the pool
-is currently serving.
+per-provider + run verdict; `kilroyHelp gate --tick` runs one enforcement pass;
+`kilroyHelp status` shows each provider's gate state and the serving engine.
+
+While a provider is gated, `kilroyHelp status`/`cliproxy check` reports `claude
+-p: skipped (claude gated)` rather than a failure — a deliberately out-of-pool
+provider is not a health fault.
+
+## Routing strategies
+
+`STRATEGY` in `/etc/kilroy-usage-gate.conf` is an ordered **degradation ladder**.
+Each tick the gate picks the first rung the currently-healthy providers satisfy;
+a rung change does `stopsafe → re-route → resume`. The strategy also picks the
+**family**, which determines how kilroy and the gate route:
+
+| Family | When | kilroy launch | gate lever |
+|---|---|---|---|
+| **graph** | `STRATEGY` contains `role-split` | direct per-node providers — both `ANTHROPIC_BASE_URL` + `OPENAI_BASE_URL` (bare host, no `/v1`), `run.yaml` has an `openai` provider, graph pipecleaned per-role | re-pipeclean the run's graph; **auths stay enabled** |
+| **pool** | otherwise (`round-robin` / `fill-first`) | the `auto` pool (`--force-model anthropic=auto`) | per-credential `disabled` (pool membership) |
+
+Rungs:
+
+- **role-split** (needs BOTH engines) — each node runs on its role's engine:
+  strong/coding nodes (`PRIMARY` / `ROLE_STRONG_PROVIDER`) on one engine, default
+  nodes (`ROLE_DEFAULT_PROVIDER`) on the other. Claude nodes call `/v1/messages`;
+  OpenAI nodes call `/v1/responses` (the OpenAI Responses API, which cliproxyapi
+  routes to codex). `kilroyHelp pipeclean --mode role-split` writes the per-class
+  assignment.
+- **fill-first** (needs ≥1) — all nodes on `PRIMARY` while it is healthy, else all
+  on the survivor. Graph family pipecleans `--mode to-engine`; pool family keeps
+  only the survivor's auth in the pool.
+- **round-robin** (needs ≥1) — nodes use the `auto` pool; the gate's auth-disable
+  makes the pool serve whichever provider is healthy.
+
+The default ladder is `role-split fill-first`: role-split when both engines are
+healthy; when one gates, pipeclean its nodes onto the survivor (fill-first); on
+recovery, pipeclean back to role-split; pause only when both gate. To survive a
+fill-first flatten, the gate always re-derives the rewrite from a pristine
+snapshot (`graph.dot.orig`) that retains the original per-role assignment, so the
+role information is never lost.
