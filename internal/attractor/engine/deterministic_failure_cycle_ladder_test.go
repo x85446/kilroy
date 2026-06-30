@@ -160,7 +160,7 @@ func TestEscalationLadder_AppliesEvidenceAndRoute(t *testing.T) {
 	logsRoot := t.TempDir()
 	dot := []byte(`
 digraph G {
-  graph [goal="ladder unit", loop_restart_signature_limit="10", loop_restart_ladder_start="6", escalation_alt_provider="openai", escalation_alt_model="gpt-5.5"]
+  graph [goal="ladder unit", loop_restart_signature_limit="10", loop_restart_ladder_start="6", escalation_alt_provider="openai", escalation_alt_model="gpt-5.5", escalation_diagnosis="false"]
   start [shape=Mdiamond]
   exit [shape=Msquare]
   n [shape=diamond, type="noop"]
@@ -172,7 +172,7 @@ digraph G {
 	eng := newReliabilityFixtureEngine(t, repo, logsRoot, "ladder-unit", dot)
 	node := &model.Node{ID: "n"}
 
-	eng.applyEscalationLadder(node, "n|deterministic|boom", 6, 10)
+	eng.applyEscalationLadder(context.Background(), node, "n|deterministic|boom", 6, 10)
 
 	summary := eng.Context.GetString(failureDossierContextSummaryKey, "")
 	if !strings.Contains(summary, "ESCALATION") {
@@ -191,7 +191,7 @@ digraph G {
 		t.Fatalf("seed dossier: %v", err)
 	}
 	eng.Context.Set(failureDossierContextLogsPathKey, dossierPath)
-	eng.applyEscalationLadder(node, "n|deterministic|boom", 8, 10)
+	eng.applyEscalationLadder(context.Background(), node, "n|deterministic|boom", 8, 10)
 	raw, err := os.ReadFile(dossierPath)
 	if err != nil {
 		t.Fatalf("read dossier: %v", err)
@@ -208,7 +208,7 @@ digraph G {
 	}
 
 	// Idempotent: a second ladder tick must not double-stack the banner.
-	eng.applyEscalationLadder(node, "n|deterministic|boom", 7, 10)
+	eng.applyEscalationLadder(context.Background(), node, "n|deterministic|boom", 7, 10)
 	summary2 := eng.Context.GetString(failureDossierContextSummaryKey, "")
 	if strings.Count(summary2, "ESCALATION (deterministic failure cycle") != 1 {
 		t.Fatalf("expected exactly one escalation banner after two ticks, got %d", strings.Count(summary2, "ESCALATION (deterministic failure cycle"))
@@ -233,13 +233,134 @@ digraph G {
 }
 `)
 	eng := newReliabilityFixtureEngine(t, repo, logsRoot, "ladder-unit-noalt", dot)
-	eng.applyEscalationLadder(&model.Node{ID: "n"}, "n|deterministic|boom", 6, 10)
+	eng.applyEscalationLadder(context.Background(), &model.Node{ID: "n"}, "n|deterministic|boom", 6, 10)
 
 	if !strings.Contains(eng.Context.GetString(failureDossierContextSummaryKey, ""), "ESCALATION") {
 		t.Fatalf("expected evidence banner even without an alternate engine")
 	}
 	if _, _, ok := eng.escalatedRouteFor("n"); ok {
 		t.Fatalf("expected no escalated route when escalation_alt_provider/model are unset")
+	}
+}
+
+// fakeDiagnosisBackend is an AgentBackend stub that captures the diagnostic
+// agent's node + prompt and returns a canned root-cause diagnosis.
+type fakeDiagnosisBackend struct {
+	gotNodeID   string
+	gotProvider string
+	gotModel    string
+	gotPrompt   string
+	reply       string
+	err         error
+}
+
+func (b *fakeDiagnosisBackend) Run(ctx context.Context, exec *Execution, node *model.Node, prompt string) (string, *runtime.Outcome, error) {
+	_ = ctx
+	_ = exec
+	b.gotNodeID = node.ID
+	b.gotProvider = node.Attr("llm_provider", "")
+	b.gotModel = node.Attr("llm_model", "")
+	b.gotPrompt = prompt
+	if b.err != nil {
+		return "", &runtime.Outcome{Status: runtime.StatusFail, FailureReason: b.err.Error()}, b.err
+	}
+	return b.reply, &runtime.Outcome{Status: runtime.StatusSuccess}, nil
+}
+
+// TestEscalationLadder_DiagnosisLever verifies lever #3: when the ladder fires
+// and a diagnostic engine is configured, a root-cause analysis agent runs on
+// that engine with an analysis-only prompt, and its diagnosis is written into
+// the failure-dossier FILE the re-run agent reads (the `diagnosis` field + a
+// summary block) plus the diagnosis context key, and "diagnosis" is reported in
+// the ladder event's levers.
+func TestEscalationLadder_DiagnosisLever(t *testing.T) {
+	repo := initTestRepo(t)
+	logsRoot := t.TempDir()
+	dot := []byte(`
+digraph G {
+  graph [goal="ladder diag", loop_restart_signature_limit="10", loop_restart_ladder_start="6", escalation_alt_provider="openai", escalation_alt_model="gpt-5.5", escalation_diagnostic_provider="anthropic", escalation_diagnostic_model="claude-opus-4-8"]
+  start [shape=Mdiamond]
+  exit [shape=Msquare]
+  n [shape=diamond, type="noop"]
+  start -> n
+  n -> exit [condition="outcome=success"]
+  n -> exit
+}
+`)
+	eng := newReliabilityFixtureEngine(t, repo, logsRoot, "ladder-diag", dot)
+	backend := &fakeDiagnosisBackend{reply: "ROOT CAUSE: /izos is created as a symlink (line 39) then mkdir as a dir (line 60) — same path, can't be both."}
+	eng.AgentBackend = backend
+
+	// Seed the dossier file the lever writes into, and point the context keys at it.
+	dossierPath := filepath.Join(logsRoot, failureDossierFileName)
+	if err := writeJSON(dossierPath, failureDossier{Version: 1, FailedNodeID: "n", Summary: "original summary"}); err != nil {
+		t.Fatalf("seed dossier: %v", err)
+	}
+	eng.Context.Set(failureDossierContextLogsPathKey, dossierPath)
+	eng.Context.Set("failure_reason", "mkdir: cannot create directory '/tmp/x/izos': File exists")
+
+	eng.applyEscalationLadder(context.Background(), &model.Node{ID: "n"}, "n|deterministic|boom", 6, 10)
+
+	// The diagnostic agent must have run on the configured diagnostic engine,
+	// on a distinct synthetic node, with an analysis-only prompt.
+	if backend.gotNodeID != "n::diagnose" {
+		t.Fatalf("expected diagnostic node id n::diagnose, got %q", backend.gotNodeID)
+	}
+	if backend.gotProvider != "anthropic" || backend.gotModel != "claude-opus-4-8" {
+		t.Fatalf("expected diagnosis on anthropic/claude-opus-4-8, got %q/%q", backend.gotProvider, backend.gotModel)
+	}
+	if !strings.Contains(backend.gotPrompt, "ROOT-CAUSE ANALYSIS ONLY") {
+		t.Fatalf("expected analysis-only diagnostic prompt, got %q", backend.gotPrompt)
+	}
+
+	// The diagnosis must land in the dossier FILE the re-run agent reads.
+	raw, err := os.ReadFile(dossierPath)
+	if err != nil {
+		t.Fatalf("read dossier: %v", err)
+	}
+	var d failureDossier
+	if err := json.Unmarshal(raw, &d); err != nil {
+		t.Fatalf("unmarshal dossier: %v", err)
+	}
+	if !strings.Contains(d.Diagnosis, "symlink") {
+		t.Fatalf("lever #3: expected diagnosis field in dossier FILE, got %q", d.Diagnosis)
+	}
+	if !strings.Contains(d.Summary, diagnosisDossierMarker) {
+		t.Fatalf("lever #3: expected diagnosis block prepended to dossier summary, got %q", d.Summary)
+	}
+	if got := eng.Context.GetString(failureDossierContextDiagnosisKey, ""); !strings.Contains(got, "symlink") {
+		t.Fatalf("lever #3: expected diagnosis context key set, got %q", got)
+	}
+}
+
+// TestEscalationLadder_DiagnosisLever_NoEngine confirms lever #3 is skipped
+// cleanly (no panic, no diagnosis) when no diagnostic engine is configured,
+// while the evidence lever still fires.
+func TestEscalationLadder_DiagnosisLever_NoEngine(t *testing.T) {
+	repo := initTestRepo(t)
+	logsRoot := t.TempDir()
+	dot := []byte(`
+digraph G {
+  graph [goal="ladder diag noeng", loop_restart_signature_limit="10", loop_restart_ladder_start="6"]
+  start [shape=Mdiamond]
+  exit [shape=Msquare]
+  n [shape=diamond, type="noop"]
+  start -> n
+  n -> exit [condition="outcome=success"]
+  n -> exit
+}
+`)
+	eng := newReliabilityFixtureEngine(t, repo, logsRoot, "ladder-diag-noeng", dot)
+	backend := &fakeDiagnosisBackend{reply: "should not be used"}
+	eng.AgentBackend = backend
+
+	eng.applyEscalationLadder(context.Background(), &model.Node{ID: "n"}, "n|deterministic|boom", 6, 10)
+
+	if backend.gotNodeID != "" {
+		t.Fatalf("expected no diagnostic run without a diagnostic engine, but backend was called for %q", backend.gotNodeID)
+	}
+	if !strings.Contains(eng.Context.GetString(failureDossierContextSummaryKey, ""), "ESCALATION") {
+		t.Fatalf("expected evidence banner to still fire when lever #3 is skipped")
 	}
 }
 

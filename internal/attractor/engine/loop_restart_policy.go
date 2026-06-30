@@ -1,12 +1,14 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/danshapiro/kilroy/internal/attractor/model"
 	"github.com/danshapiro/kilroy/internal/attractor/runtime"
@@ -251,6 +253,56 @@ func escalationAltRoute(g *model.Graph) (string, string, bool) {
 	return ap, am, true
 }
 
+// escalationDiagnosisEnabled reports whether lever #3 (root-cause diagnosis)
+// runs when the ladder engages. Default true: when an operator turns the ladder
+// on (loop_restart_ladder_start>0), the diagnosis pass is the point of it. Set
+// graph attr escalation_diagnosis=false/0/off/no to disable it (e.g. to save the
+// extra LLM call) while keeping the evidence + engine levers.
+func escalationDiagnosisEnabled(g *model.Graph) bool {
+	if g == nil {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(g.Attrs["escalation_diagnosis"])) {
+	case "false", "0", "off", "no", "disable", "disabled":
+		return false
+	default:
+		return true
+	}
+}
+
+// escalationDiagnosticRoute returns the (provider, model) the lever #3 diagnosis
+// agent runs on, and whether one is available. Preference: an explicit
+// escalation_diagnostic_provider/model pair, else the lever #2 alternate engine
+// (escalation_alt_provider/model). Like the alt route it is fully
+// graph-configured — kilroy hardcodes no engine. ok=false means lever #3 has no
+// engine to run on and is skipped.
+func escalationDiagnosticRoute(g *model.Graph) (string, string, bool) {
+	if g == nil {
+		return "", "", false
+	}
+	dp := normalizeProviderKey(strings.TrimSpace(g.Attrs["escalation_diagnostic_provider"]))
+	dm := strings.TrimSpace(g.Attrs["escalation_diagnostic_model"])
+	if dp != "" && dm != "" {
+		return dp, dm, true
+	}
+	return escalationAltRoute(g)
+}
+
+// escalationDiagnosisTimeout bounds how long the lever #3 diagnosis agent may
+// run before it is abandoned (best-effort; the run continues regardless). Graph
+// attr escalation_diagnosis_timeout_sec overrides the default.
+func escalationDiagnosisTimeout(g *model.Graph) time.Duration {
+	const def = 300
+	secs := def
+	if g != nil {
+		secs = parseInt(g.Attrs["escalation_diagnosis_timeout_sec"], def)
+		if secs < 30 {
+			secs = def
+		}
+	}
+	return time.Duration(secs) * time.Second
+}
+
 // escalatedRouteFor returns the alternate (provider, model) the ladder assigned
 // to a node, if any. AgentRouter calls this before resolving the node's own
 // llm_provider.
@@ -302,6 +354,108 @@ func (e *Engine) injectEscalationIntoDossierFiles(banner string) {
 	}
 }
 
+const diagnosisDossierMarker = "ROOT-CAUSE DIAGNOSIS (escalation lever #3)"
+
+// injectDiagnosisIntoDossierFiles writes the lever #3 root-cause diagnosis into
+// the failure dossier file(s) the re-run agent reads, both as the prominent
+// `diagnosis` field and prepended to `summary`. Best-effort and idempotent: a
+// repeat tick overwrites the field and re-stacks at most one diagnosis block.
+func (e *Engine) injectDiagnosisIntoDossierFiles(diagnosis string) {
+	if e == nil || e.Context == nil {
+		return
+	}
+	block := diagnosisDossierMarker + ":\n" + diagnosis
+	paths := map[string]bool{}
+	if lp := strings.TrimSpace(e.Context.GetString(failureDossierContextLogsPathKey, "")); lp != "" {
+		paths[lp] = true
+	}
+	if rel := strings.TrimSpace(e.Context.GetString(failureDossierContextPathKey, "")); rel != "" {
+		if filepath.IsAbs(rel) {
+			paths[rel] = true
+		} else if wt := strings.TrimSpace(e.WorktreeDir); wt != "" {
+			paths[filepath.Join(wt, filepath.FromSlash(rel))] = true
+		}
+	}
+	for p := range paths {
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var d failureDossier
+		if err := json.Unmarshal(raw, &d); err != nil {
+			continue
+		}
+		d.Diagnosis = diagnosis
+		if !strings.Contains(d.Summary, diagnosisDossierMarker) {
+			d.Summary = block + "\n\n" + d.Summary
+		}
+		_ = writeJSON(p, d)
+	}
+}
+
+// runRootCauseDiagnosis is escalation lever #3: it runs a dedicated analysis
+// agent (on the configured diagnostic engine) that reads the artifacts the
+// stuck stage produced/consumed, cross-references them against the recurring
+// failure, and returns a concise root-cause diagnosis. It mutates nothing in the
+// worktree (analysis-only prompt) and is fully best-effort — any missing
+// backend/engine/error yields an empty string and the run continues. The
+// returned diagnosis is handed to the next coding attempt via the dossier.
+func (e *Engine) runRootCauseDiagnosis(ctx context.Context, node *model.Node, count, limit int) string {
+	if e == nil || node == nil || e.AgentBackend == nil {
+		return ""
+	}
+	prov, modelID, ok := escalationDiagnosticRoute(e.Graph)
+	if !ok {
+		return ""
+	}
+
+	failureReason := ""
+	dossierPath := ""
+	if e.Context != nil {
+		failureReason = strings.TrimSpace(e.Context.GetString("failure_reason", ""))
+		dossierPath = strings.TrimSpace(e.Context.GetString(failureDossierContextPathKey, ""))
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "ROOT-CAUSE ANALYSIS ONLY — do NOT modify, create, or delete any file; use read/search/inspect tools only and report your findings.\n\n")
+	fmt.Fprintf(&sb, "The build/test stage %q has now failed %d times in a row with the SAME failure (attempt %d of %d before this run aborts). Prior coding attempts changed things but did NOT resolve it — so the surface error is a symptom, not the cause.\n\n", node.ID, count, count, limit)
+	if failureReason != "" {
+		fmt.Fprintf(&sb, "Recurring failure:\n%s\n\n", failureReason)
+	}
+	if dossierPath != "" {
+		fmt.Fprintf(&sb, "Full structured evidence (read it first): %s\n\n", dossierPath)
+	}
+	sb.WriteString("Your job: find the ROOT cause. Read the scripts, configs, Makefiles, and generated artifacts that this stage produces and consumes. Cross-reference what was produced against the exact error — look specifically for internal contradictions (e.g. the same path created two incompatible ways, a tool invoked but never installed, a value required upstream but never set). Trace the failing command back to the line that makes it inevitable.\n\n")
+	sb.WriteString("Output ONLY your analysis as your final message, in this shape:\n- ROOT CAUSE: <the single specific contradiction or gap, with file:line references>\n- WHY RETRIES FAILED: <why the same surface fix keeps not working>\n- FIX DIRECTION: <the minimal change that resolves the contradiction>\n")
+
+	diagNode := &model.Node{
+		ID: node.ID + "::diagnose",
+		Attrs: map[string]string{
+			"llm_provider":     prov,
+			"llm_model":        modelID,
+			"reasoning_effort": "high",
+			"max_agent_turns":  "20",
+		},
+	}
+	exec := &Execution{
+		Graph:       e.Graph,
+		Context:     e.Context,
+		LogsRoot:    e.LogsRoot,
+		WorktreeDir: e.WorktreeDir,
+		Engine:      e,
+		Artifacts:   e.Artifacts,
+	}
+
+	dctx, cancel := context.WithTimeout(ctx, escalationDiagnosisTimeout(e.Graph))
+	defer cancel()
+	text, _, err := e.AgentBackend.Run(dctx, exec, diagNode, sb.String())
+	if err != nil {
+		e.Warn(fmt.Sprintf("escalation diagnosis (node %s): %v", node.ID, err))
+		return ""
+	}
+	return strings.TrimSpace(text)
+}
+
 // applyEscalationLadder fires the domain-agnostic escalation levers for a
 // deterministic failure signature that has recurred into [ladder_start, limit).
 // It never aborts — only count>=limit (handled by the caller) does.
@@ -312,13 +466,18 @@ func (e *Engine) injectEscalationIntoDossierFiles(banner string) {
 //   - Lever #2 (engine): record an alternate (provider, model) for the stuck
 //     node so its next attempt runs on a different engine (only when an
 //     alternate is configured on the graph).
+//   - Lever #3 (diagnosis): run a dedicated root-cause analysis agent that reads
+//     the produced artifacts against the failure and writes a diagnosis into the
+//     dossier, so the next coding attempt starts from a root-cause analysis
+//     instead of the raw error tail (only when a diagnostic engine is available
+//     and escalation_diagnosis is not disabled).
 //
-// Both levers are best-effort and idempotent across repeats.
-func (e *Engine) applyEscalationLadder(node *model.Node, sig string, count, limit int) {
+// All levers are best-effort and idempotent across repeats.
+func (e *Engine) applyEscalationLadder(ctx context.Context, node *model.Node, sig string, count, limit int) {
 	if e == nil || node == nil {
 		return
 	}
-	levers := make([]string, 0, 2)
+	levers := make([]string, 0, 3)
 
 	// Lever #1 — evidence injection. The re-run agent is told (by the failure-
 	// dossier preamble) to read the dossier FILE as authoritative evidence, so
@@ -349,6 +508,24 @@ func (e *Engine) applyEscalationLadder(node *model.Node, sig string, count, limi
 		levers = append(levers, "engine")
 	}
 
+	// Lever #3 — root-cause diagnosis: run an analysis agent that reads the
+	// produced artifacts against the recurring failure and writes its diagnosis
+	// into the dossier the re-run agent reads, so the next attempt attacks the
+	// cause instead of the symptom. Best-effort: skipped silently if disabled or
+	// no diagnostic engine is configured. Runs after lever #2 so the diagnostic
+	// route is independent of (not overridden by) the stuck node's alt route.
+	diagnosed := false
+	if escalationDiagnosisEnabled(e.Graph) {
+		if diagnosis := e.runRootCauseDiagnosis(ctx, node, count, limit); diagnosis != "" {
+			e.injectDiagnosisIntoDossierFiles(diagnosis)
+			if e.Context != nil {
+				e.Context.Set(failureDossierContextDiagnosisKey, diagnosis)
+			}
+			levers = append(levers, "diagnosis")
+			diagnosed = true
+		}
+	}
+
 	e.appendProgress(map[string]any{
 		"event":           "deterministic_failure_cycle_ladder",
 		"node_id":         node.ID,
@@ -358,6 +535,7 @@ func (e *Engine) applyEscalationLadder(node *model.Node, sig string, count, limi
 		"levers":          levers,
 		"alt_provider":    altProvider,
 		"alt_model":       altModel,
+		"diagnosed":       diagnosed,
 	})
 }
 

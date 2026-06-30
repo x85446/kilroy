@@ -2,3 +2,4 @@ Failure dossier contract:
 - The previous failed stage has a structured run-scoped failure dossier at `{{.WorktreePath}}`.
 - Use this dossier as authoritative failure evidence before deciding routing/classification outcomes.
 - A logs-root copy is available at `{{.LogsPath}}`.
+- If the dossier has an `escalation` or `diagnosis` field, treat it as the highest-priority guidance: the same failure has recurred and prior fixes did not work. Act on the root cause it identifies — do not repeat a fix that already failed.

@@ -881,7 +881,7 @@ func (e *Engine) runLoop(ctx context.Context, current string, completed []string
 				// and route the stuck node to an alternate engine. Domain-
 				// agnostic; only count>=limit aborts.
 				if ladderStart := loopRestartLadderStart(e.Graph); ladderStart > 0 && count >= ladderStart && count < limit {
-					e.applyEscalationLadder(node, sig, count, limit)
+					e.applyEscalationLadder(ctx, node, sig, count, limit)
 				}
 				if count >= limit {
 					reason := fmt.Sprintf(
