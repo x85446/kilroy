@@ -1096,6 +1096,30 @@ func profileForProvider(provider string, modelID string) (agent.ProviderProfile,
 	}
 }
 
+// maxCLIPromptArgBytes is the largest prompt we will pass as a single argv
+// element to a provider CLI. Linux caps a single argv string at MAX_ARG_STRLEN
+// (128 KiB); we stay comfortably under it and fall back to stdin for anything
+// larger so fork/exec never fails with "argument list too long".
+const maxCLIPromptArgBytes = 120 * 1024
+
+// cliPromptMode decides whether a provider CLI receives the prompt as a
+// positional argv element ("arg") or on stdin ("stdin"). Anthropic/Google CLIs
+// default to arg (their print mode expects a positional prompt), but an argv
+// element larger than the kernel cap fails fork/exec, so oversized prompts fall
+// back to stdin (print mode reads the prompt from stdin when no positional
+// prompt is present). All other providers always use stdin.
+func cliPromptMode(provider string, promptBytes int) string {
+	switch normalizeProviderKey(provider) {
+	case "anthropic", "google":
+		if promptBytes > maxCLIPromptArgBytes {
+			return "stdin"
+		}
+		return "arg"
+	default:
+		return "stdin"
+	}
+}
+
 func (r *AgentRouter) runCLI(ctx context.Context, execCtx *Execution, node *model.Node, provider string, modelID string, prompt string) (string, *runtime.Outcome, error) {
 	stageDir := filepath.Join(execCtx.LogsRoot, node.ID)
 	contract := BuildStageStatusContract(execCtx.WorktreeDir)
@@ -1203,12 +1227,17 @@ func (r *AgentRouter) runCLI(ctx context.Context, execCtx *Execution, node *mode
 
 	actualArgs := args
 	recordedArgs := args
-	promptMode := "stdin"
-	switch normalizeProviderKey(provider) {
-	case "anthropic", "google":
-		promptMode = "arg"
+	promptMode := cliPromptMode(provider, len(prompt))
+	if promptMode == "arg" {
 		actualArgs = insertPromptArg(args, prompt)
 		recordedArgs = insertPromptArg(args, "<prompt>")
+	} else if k := normalizeProviderKey(provider); k == "anthropic" || k == "google" {
+		// An arg-mode provider was forced to stdin because the prompt exceeds the
+		// argv cap. Without this fallback, fork/exec fails with "argument list too
+		// long" — a deterministic failure the cycle breaker miscounts toward abort
+		// (print mode reads the prompt from stdin when no positional prompt is
+		// present; materializeCLIInvocation drops the empty {{prompt}} token).
+		WarnEngine(execCtx, fmt.Sprintf("cli prompt is %d bytes (> %d arg limit) for provider %s node %s; passing prompt via stdin to avoid E2BIG", len(prompt), maxCLIPromptArgBytes, provider, node.ID))
 	}
 
 	inv := map[string]any{

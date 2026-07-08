@@ -119,6 +119,23 @@ func classifyProviderCLIError(provider string, stderr string, runErr error) prov
 		}
 	}
 
+	// Before defaulting to deterministic (which the cycle breaker counts toward
+	// abort), sweep the shared transient-infra hint list. Provider hiccups —
+	// stream/connection closes, 5xx/overloaded, transport churn — are transient:
+	// classifying them deterministic makes a flaky provider drive the run to a
+	// false "deterministic failure cycle" abort. Genuinely persistent/unknown
+	// failures still fall through to deterministic below, so the breaker keeps
+	// catching real stuck states (bad auth, missing capability, etc.).
+	for _, hint := range transientInfraReasonHints {
+		if strings.Contains(combined, hint) {
+			return providerCLIClassifiedError{
+				FailureClass:     failureClassTransientInfra,
+				FailureSignature: fmt.Sprintf("provider_transient|%s|hiccup", providerKey),
+				FailureReason:    reason,
+			}
+		}
+	}
+
 	return providerCLIClassifiedError{
 		FailureClass:     failureClassDeterministic,
 		FailureSignature: fmt.Sprintf("provider_failure|%s|unknown", providerKey),
