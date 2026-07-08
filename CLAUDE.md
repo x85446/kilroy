@@ -80,6 +80,38 @@ cd "$(/opt/darkfactory/scripts/kilroy-s5-results.sh cdlatest)"
 
 ---
 
+## ALWAYS run through the usage gate (never bypass it)
+
+**Rule: start and resume runs with `kilroyHelp launch` — NEVER with
+`systemctl start kilroy-run.service` directly.**
+
+The token throttle is the **usage-gate daemon**. It polls Anthropic's OAuth
+usage endpoint (5-hour primary + 7-day secondary windows) and *parks* the run
+at the next node boundary when a burn envelope is exceeded, then auto-resumes
+when the window resets. `kilroyHelp launch resume|run` starts that daemon
+alongside the run (`_gate_start_daemon`). The systemd unit's `ExecStart`
+(`kilroyHelp _system-runner`) does **not** — so `systemctl start
+kilroy-run.service` runs the engine with **zero throttling** and will burn
+straight through your subscription quota (observed: 894 requests / 112 rate-limit
+hits / 23% of the 7-day window in ~2h, tokens killed).
+
+- Resume the current run:  `cd <repo> && kilroyHelp launch resume`
+- Fresh run:               `cd <repo> && kilroyHelp launch run`
+- Stop:                    `kilroyHelp launch stop` (or `stopsafe` to finish the
+  in-flight node first)
+
+Do **not** reach for the `systemctl start` path as a "avoid graph churn"
+shortcut. Churn (the dual-AI strategy pipeclean) is controlled by the gate
+config's `STRATEGY`, not by whether the gate runs: set `STRATEGY=anthropic-tiers`
+in `/etc/kilroy-usage-gate.conf` to keep an all-anthropic run all-anthropic
+(no pipeclean, no OpenAI wiring) while still getting the parking throttle.
+Gate config lives at `/etc/kilroy-usage-gate.conf`; `MODE=logical` applies the
+5h burn envelope + weekly pace guard. The gate throttles **everything** the run
+sends through cliproxyapi, including the escalation ladder's lever-#3 diagnosis
+agents.
+
+---
+
 ## Run-artifact layout
 
 A completed run on either host lives at:
