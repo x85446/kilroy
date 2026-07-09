@@ -100,6 +100,18 @@ hits / 23% of the 7-day window in ~2h, tokens killed).
 - Stop:                    `kilroyHelp launch stop` (or `stopsafe` to finish the
   in-flight node first)
 
+**Reboot durability.** The gate daemon runs as its own systemd unit,
+`kilroy-usage-gate.service` (`ExecStart=…/kilroyHelp gate run`, `Restart=always`,
+enabled), NOT a bare `nohup … gate run &` — a bare daemon dies on VM reboot and
+leaves the run burning unthrottled (or, if `kilroy-run.service` was also killed,
+the run down entirely). Both units are `enabled` so a reboot auto-starts the run
+*and* the gate, which reconcile (the gate manages the live run). After any host
+reboot, verify both: `systemctl is-active kilroy-run.service
+kilroy-usage-gate.service` → both `active`; `systemctl is-enabled …` → both
+`enabled`. `kilroyHelp launch` detects an already-running gate unit (prints
+`already running (pid …)`) instead of double-starting, so it's safe to launch on
+top of the unit.
+
 Do **not** reach for the `systemctl start` path as a "avoid graph churn"
 shortcut. Churn (the dual-AI strategy pipeclean) is controlled by the gate
 config's `STRATEGY`, not by whether the gate runs.
