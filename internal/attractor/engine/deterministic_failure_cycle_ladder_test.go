@@ -252,11 +252,13 @@ type fakeDiagnosisBackend struct {
 	gotPrompt   string
 	reply       string
 	err         error
+	calls       int
 }
 
 func (b *fakeDiagnosisBackend) Run(ctx context.Context, exec *Execution, node *model.Node, prompt string) (string, *runtime.Outcome, error) {
 	_ = ctx
 	_ = exec
+	b.calls++
 	b.gotNodeID = node.ID
 	b.gotProvider = node.Attr("llm_provider", "")
 	b.gotModel = node.Attr("llm_model", "")
@@ -330,6 +332,90 @@ digraph G {
 	}
 	if got := eng.Context.GetString(failureDossierContextDiagnosisKey, ""); !strings.Contains(got, "symlink") {
 		t.Fatalf("lever #3: expected diagnosis context key set, got %q", got)
+	}
+}
+
+// TestEscalationLadder_DiagnosisPersists is the fix-c regression test. It proves
+// a lever #3 diagnosis, once produced, is cached by failure signature so that:
+//   (1) a later ladder tick with the SAME signature reuses the cache instead of
+//       re-running the (expensive) analysis agent, and still reports the lever;
+//   (2) updateFailureDossierContext — which regenerates the dossier
+//       latest-failure-wins on every fail/retry — re-attaches the cached
+//       diagnosis so it survives into the dossier the next coding attempt reads;
+//   (3) the cache is checkpointed and restored (survives resumes).
+func TestEscalationLadder_DiagnosisPersists(t *testing.T) {
+	repo := initTestRepo(t)
+	logsRoot := t.TempDir()
+	dot := []byte(`
+digraph G {
+  graph [goal="ladder diag persist", loop_restart_signature_limit="10", loop_restart_ladder_start="6", escalation_diagnostic_provider="anthropic", escalation_diagnostic_model="claude-opus-4-8"]
+  start [shape=Mdiamond]
+  exit [shape=Msquare]
+  n [shape=diamond, type="noop"]
+  start -> n
+  n -> exit [condition="outcome=success"]
+  n -> exit
+}
+`)
+	eng := newReliabilityFixtureEngine(t, repo, logsRoot, "ladder-diag-persist", dot)
+	backend := &fakeDiagnosisBackend{reply: "ROOT CAUSE: /izos symlink-vs-dir collision."}
+	eng.AgentBackend = backend
+
+	dossierPath := filepath.Join(logsRoot, failureDossierFileName)
+	if err := writeJSON(dossierPath, failureDossier{Version: 1, FailedNodeID: "n", Summary: "original summary"}); err != nil {
+		t.Fatalf("seed dossier: %v", err)
+	}
+	eng.Context.Set(failureDossierContextLogsPathKey, dossierPath)
+
+	node := &model.Node{ID: "n"}
+	const sig = "n|deterministic|boom"
+
+	// First tick: the analysis agent runs once and populates the cache.
+	eng.applyEscalationLadder(context.Background(), node, sig, 6, 10)
+	if backend.calls != 1 {
+		t.Fatalf("expected diagnostic agent to run once on first tick, ran %d times", backend.calls)
+	}
+	if eng.cachedDiagnosis(sig) == "" {
+		t.Fatalf("expected diagnosis cached under signature %q", sig)
+	}
+
+	// (1) Second tick, same signature: reuse the cache, do NOT re-run the agent.
+	eng.applyEscalationLadder(context.Background(), node, sig, 7, 10)
+	if backend.calls != 1 {
+		t.Fatalf("expected cached diagnosis reuse on second tick (no re-run), agent ran %d times", backend.calls)
+	}
+
+	// (2) A fresh dossier rebuild (latest-failure-wins) must re-attach the cached
+	// diagnosis. Overwrite the dossier file with a diagnosis-free version the way
+	// updateFailureDossierContext does, then drive it and assert re-attachment.
+	out := runtime.Outcome{Status: runtime.StatusFail, FailureReason: "boom"}
+	eng.updateFailureDossierContext(node, out, failureClassDeterministic, map[string]int{})
+	raw, err := os.ReadFile(dossierPath)
+	if err != nil {
+		t.Fatalf("read rebuilt dossier: %v", err)
+	}
+	var d failureDossier
+	if err := json.Unmarshal(raw, &d); err != nil {
+		t.Fatalf("unmarshal rebuilt dossier: %v", err)
+	}
+	if !strings.Contains(d.Diagnosis, "collision") {
+		t.Fatalf("fix-c: expected cached diagnosis re-attached to rebuilt dossier, got %q", d.Diagnosis)
+	}
+	if !strings.Contains(d.Summary, diagnosisDossierMarker) {
+		t.Fatalf("fix-c: expected diagnosis block in rebuilt dossier summary, got %q", d.Summary)
+	}
+
+	// (3) Checkpoint round-trip: both the in-memory (map[string]string) and the
+	// JSON-reloaded (map[string]any) forms restore the cache.
+	cp := runtime.NewCheckpoint()
+	cp.Extra = map[string]any{"loop_failure_diagnoses": copyStringStringMap(eng.diagnosisBySignature)}
+	if got := restoreLoopFailureDiagnoses(cp)[sig]; !strings.Contains(got, "collision") {
+		t.Fatalf("fix-c: expected diagnosis restored from map[string]string checkpoint, got %q", got)
+	}
+	cpJSON := runtime.NewCheckpoint()
+	cpJSON.Extra = map[string]any{"loop_failure_diagnoses": map[string]any{sig: "ROOT CAUSE: /izos symlink-vs-dir collision."}}
+	if got := restoreLoopFailureDiagnoses(cpJSON)[sig]; !strings.Contains(got, "collision") {
+		t.Fatalf("fix-c: expected diagnosis restored from map[string]any checkpoint, got %q", got)
 	}
 }
 

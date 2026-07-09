@@ -90,6 +90,18 @@ func (e *Engine) updateFailureDossierContext(node *model.Node, out runtime.Outco
 	}
 
 	dossier := e.buildFailureDossier(node, out, failureClass, retries)
+	// Re-attach a persisted root-cause diagnosis (escalation lever #3) for this
+	// exact failure signature, if one was produced on an earlier pass. The
+	// dossier is regenerated latest-failure-wins on every fail/retry, which would
+	// otherwise drop a diagnosis the ladder injected into a prior dossier version;
+	// re-attaching here keeps it in front of every subsequent coding attempt (and
+	// across resumes, since the cache is checkpointed).
+	if diag := e.cachedDiagnosis(restartFailureSignature(node.ID, out, failureClass)); diag != "" {
+		dossier.Diagnosis = diag
+		if !strings.Contains(dossier.Summary, diagnosisDossierMarker) {
+			dossier.Summary = diagnosisDossierMarker + ":\n" + diag + "\n\n" + dossier.Summary
+		}
+	}
 	// Latest failure wins: this file is intentionally overwritten on each
 	// fail/retry outcome so the next agent stage reads current evidence.
 	logsPath := filepath.Join(e.LogsRoot, failureDossierFileName)
@@ -117,6 +129,9 @@ func (e *Engine) updateFailureDossierContext(node *model.Node, out runtime.Outco
 	e.Context.Set(failureDossierContextFailedNodeKey, dossier.FailedNodeID)
 	e.Context.Set(failureDossierContextFailureClassKey, dossier.FailureClass)
 	e.Context.Set(failureDossierContextSummaryKey, dossier.Summary)
+	if strings.TrimSpace(dossier.Diagnosis) != "" {
+		e.Context.Set(failureDossierContextDiagnosisKey, dossier.Diagnosis)
+	}
 	e.appendProgress(map[string]any{
 		"event":          "failure_dossier_updated",
 		"failed_node_id": dossier.FailedNodeID,
@@ -142,6 +157,7 @@ func (e *Engine) clearFailureDossierContext() {
 	e.Context.Set(failureDossierContextFailedNodeKey, "")
 	e.Context.Set(failureDossierContextFailureClassKey, "")
 	e.Context.Set(failureDossierContextSummaryKey, "")
+	e.Context.Set(failureDossierContextDiagnosisKey, "")
 }
 
 func (e *Engine) buildFailureDossier(node *model.Node, out runtime.Outcome, failureClass string, retries map[string]int) failureDossier {

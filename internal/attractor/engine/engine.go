@@ -284,6 +284,13 @@ type Engine struct {
 	// nothing about the target.
 	escalatedRoutes map[string]escalationRoute
 
+	// diagnosisBySignature caches the escalation lever #3 root-cause diagnosis
+	// keyed by failure signature. It is checkpointed (loop_failure_diagnoses) so
+	// a diagnosis survives dossier regeneration (which is latest-failure-wins),
+	// later coding passes, and resumes — and so the expensive analysis agent runs
+	// at most once per distinct failure instead of on every ladder tick.
+	diagnosisBySignature map[string]string
+
 	// loopIterations tracks the current iteration count per loop body entry
 	// node. Used by handleLoopIteration to assign distinct attempt numbers
 	// to each loop iteration so every iteration gets its own DB row and
@@ -1915,6 +1922,9 @@ func (e *Engine) checkpoint(nodeID string, out runtime.Outcome, completed []stri
 	}
 	if len(e.loopFailureSignatures) > 0 {
 		cp.Extra["loop_failure_signatures"] = copyStringIntMap(e.loopFailureSignatures)
+	}
+	if len(e.diagnosisBySignature) > 0 {
+		cp.Extra["loop_failure_diagnoses"] = copyStringStringMap(e.diagnosisBySignature)
 	}
 	if strings.TrimSpace(e.lastResolvedFidelity) != "" {
 		cp.Extra["last_fidelity"] = e.lastResolvedFidelity

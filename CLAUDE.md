@@ -102,13 +102,33 @@ hits / 23% of the 7-day window in ~2h, tokens killed).
 
 Do **not** reach for the `systemctl start` path as a "avoid graph churn"
 shortcut. Churn (the dual-AI strategy pipeclean) is controlled by the gate
-config's `STRATEGY`, not by whether the gate runs: set `STRATEGY=anthropic-tiers`
-in `/etc/kilroy-usage-gate.conf` to keep an all-anthropic run all-anthropic
-(no pipeclean, no OpenAI wiring) while still getting the parking throttle.
-Gate config lives at `/etc/kilroy-usage-gate.conf`; `MODE=logical` applies the
-5h burn envelope + weekly pace guard. The gate throttles **everything** the run
-sends through cliproxyapi, including the escalation ladder's lever-#3 diagnosis
-agents.
+config's `STRATEGY`, not by whether the gate runs.
+
+**Gate `STRATEGY` is a degradation LADDER of rungs — only three tokens are
+valid: `role-split`, `fill-first`, `round-robin`** (see `_gate_active_mode`).
+Anything else (e.g. `anthropic-tiers`, which is a *pipeclean* mode, not a gate
+rung) matches no rung → `active=""` → the gate treats it as "all providers
+gated" and **parks the run forever, never resuming.**
+
+- `role-split` = graph family; the daemon **pipecleans the run graph to dual-AI**
+  (`_gate_enforce_graph`) whenever it's the active rung (needs *both* claude and
+  codex healthy). Do **not** use it for an all-anthropic run — it churns the graph.
+- `fill-first` / `round-robin` = pool family; the daemon throttles by
+  **auth-disable only** (`_gate_enforce_pool`), never touches the graph.
+
+**For a baked all-anthropic run, use `STRATEGY=fill-first` AND `PROVIDERS=claude`**
+in `/etc/kilroy-usage-gate.conf`. `PROVIDERS=claude` is essential: the default
+`claude codex` makes `fill-first` stay "satisfiable" via a healthy codex even
+when claude's window is full, so it never parks; limiting the gate to claude
+makes it park when *claude* hits its envelope and resume when it resets.
+`cmd_resume` does not force the pool model, so the baked per-node anthropic
+tiers are preserved (verify after launch: graph has 0 openai/gpt/codex nodes).
+
+`MODE=logical` applies the 5h burn envelope + weekly pace guard. The gate
+throttles **everything** the run sends through cliproxyapi, including the
+escalation ladder's lever-#3 diagnosis agents. If the run ever ends up
+stuck-parked, check `/tmp/kilroy-usage-gate.state` — `state:parked` with a
+usage well under threshold means a misconfigured `STRATEGY`/`PROVIDERS`.
 
 ---
 

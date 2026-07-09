@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-
 	"github.com/danshapiro/kilroy/internal/attractor/modeldb"
 	"github.com/danshapiro/kilroy/internal/attractor/runtime"
 	"github.com/danshapiro/kilroy/internal/cxdb"
@@ -314,6 +313,7 @@ func resumeFromLogsRoot(ctx context.Context, logsRoot string, ov ResumeOverrides
 	eng.pruneAllParallelPassesAtStartup(logsRoot)
 	eng.restartFailureSignatures = restoreRestartFailureSignatures(cp)
 	eng.loopFailureSignatures = restoreLoopFailureSignatures(cp)
+	eng.diagnosisBySignature = restoreLoopFailureDiagnoses(cp)
 	eng.baseSHA = cp.GitCommitSHA
 	eng.lastCheckpointSHA = cp.GitCommitSHA
 	if cp != nil && cp.Extra != nil {
@@ -654,6 +654,36 @@ func restoreLoopFailureSignatures(cp *runtime.Checkpoint) map[string]int {
 			}
 			if n, ok := anyToNonNegativeInt(v); ok {
 				out[strings.TrimSpace(k)] = n
+			}
+		}
+	}
+	return out
+}
+
+func restoreLoopFailureDiagnoses(cp *runtime.Checkpoint) map[string]string {
+	out := map[string]string{}
+	if cp == nil || cp.Extra == nil {
+		return out
+	}
+	raw, ok := cp.Extra["loop_failure_diagnoses"]
+	if !ok || raw == nil {
+		return out
+	}
+	switch m := raw.(type) {
+	case map[string]string:
+		for k, v := range m {
+			if key := strings.TrimSpace(k); key != "" && strings.TrimSpace(v) != "" {
+				out[key] = v
+			}
+		}
+	case map[string]any:
+		for k, v := range m {
+			key := strings.TrimSpace(k)
+			if key == "" {
+				continue
+			}
+			if s := strings.TrimSpace(anyToStringValue(v)); s != "" {
+				out[key] = s
 			}
 		}
 	}

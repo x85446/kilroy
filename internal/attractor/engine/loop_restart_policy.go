@@ -401,6 +401,30 @@ func (e *Engine) injectDiagnosisIntoDossierFiles(diagnosis string) {
 	}
 }
 
+// cachedDiagnosis returns the persisted lever #3 root-cause diagnosis for a
+// failure signature, or "" if none was produced yet. The cache survives dossier
+// regeneration and resumes (checkpointed as loop_failure_diagnoses).
+func (e *Engine) cachedDiagnosis(sig string) string {
+	if e == nil || e.diagnosisBySignature == nil {
+		return ""
+	}
+	return strings.TrimSpace(e.diagnosisBySignature[strings.TrimSpace(sig)])
+}
+
+// storeDiagnosis records a lever #3 diagnosis for a failure signature so later
+// dossier rebuilds and resumes can re-attach it without re-running the agent.
+func (e *Engine) storeDiagnosis(sig, diagnosis string) {
+	sig = strings.TrimSpace(sig)
+	diagnosis = strings.TrimSpace(diagnosis)
+	if e == nil || sig == "" || diagnosis == "" {
+		return
+	}
+	if e.diagnosisBySignature == nil {
+		e.diagnosisBySignature = map[string]string{}
+	}
+	e.diagnosisBySignature[sig] = diagnosis
+}
+
 // runRootCauseDiagnosis is escalation lever #3: it runs a dedicated analysis
 // agent (on the configured diagnostic engine) that reads the artifacts the
 // stuck stage produced/consumed, cross-references them against the recurring
@@ -522,9 +546,20 @@ func (e *Engine) applyEscalationLadder(ctx context.Context, node *model.Node, si
 	// cause instead of the symptom. Best-effort: skipped silently if disabled or
 	// no diagnostic engine is configured. Runs after lever #2 so the diagnostic
 	// route is independent of (not overridden by) the stuck node's alt route.
+	// If this exact signature was already diagnosed on an earlier tick, reuse
+	// the cached diagnosis instead of paying for the analysis agent again — the
+	// root cause of an identical, unchanged failure does not change between
+	// ticks. Only run the agent for a signature we have not diagnosed yet.
 	diagnosed := false
+	diagnosisReused := false
 	if escalationDiagnosisEnabled(e.Graph) {
-		if diagnosis := e.runRootCauseDiagnosis(ctx, node, count, limit); diagnosis != "" {
+		diagnosis := e.cachedDiagnosis(sig)
+		diagnosisReused = diagnosis != ""
+		if diagnosis == "" {
+			diagnosis = e.runRootCauseDiagnosis(ctx, node, count, limit)
+		}
+		if diagnosis != "" {
+			e.storeDiagnosis(sig, diagnosis)
 			e.injectDiagnosisIntoDossierFiles(diagnosis)
 			if e.Context != nil {
 				e.Context.Set(failureDossierContextDiagnosisKey, diagnosis)
@@ -535,15 +570,16 @@ func (e *Engine) applyEscalationLadder(ctx context.Context, node *model.Node, si
 	}
 
 	e.appendProgress(map[string]any{
-		"event":           "deterministic_failure_cycle_ladder",
-		"node_id":         node.ID,
-		"signature":       sig,
-		"signature_count": count,
-		"signature_limit": limit,
-		"levers":          levers,
-		"alt_provider":    altProvider,
-		"alt_model":       altModel,
-		"diagnosed":       diagnosed,
+		"event":            "deterministic_failure_cycle_ladder",
+		"node_id":          node.ID,
+		"signature":        sig,
+		"signature_count":  count,
+		"signature_limit":  limit,
+		"levers":           levers,
+		"alt_provider":     altProvider,
+		"alt_model":        altModel,
+		"diagnosed":        diagnosed,
+		"diagnosis_cached": diagnosisReused,
 	})
 }
 
